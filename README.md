@@ -1,119 +1,269 @@
-# llm-wiki
+# Aftertaste
 
-**An OpenClaw / Codex Agent Skill for building Karpathy-style LLM knowledge bases.**
+Aftertaste is a local-first, taste-led knowledge base for creators.
 
-> Experimental skill — will iterate over time.
-> Please send your feedbacks in github issues.
+The product idea is simple:
 
-Inspired by [Andrej Karpathy's llm-wiki Gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) and the community's work building on it.
+- save references you actually care about
+- compile them into a durable markdown vault
+- surface patterns in your taste over time
+- turn those patterns into hooks, scripts, and shot lists
 
-## What this is
+This repo is no longer just a generic `llm-wiki` fork. It now contains the first Aftertaste MVP built on top of that file-native wiki philosophy.
 
-Instead of RAG (re-retrieving raw docs on every query), this pattern has the LLM **compile** raw sources into a persistent, cross-linked Markdown wiki. Every `compile`, `ingest`, `query`, `lint`, and `audit` pass makes the wiki richer. Knowledge compounds over time.
+## Product Direction
 
-- You own: sourcing raw material, asking good questions, steering direction, filing feedback on things the AI got wrong.
-- LLM owns: all writing, cross-referencing, filing, bookkeeping, and acting on your feedback.
+Aftertaste is aimed at solo short-form creators, especially people working in:
 
-The skill comes with two companion tools in this repo:
+- journal-ish personal reels
+- cinematic references
+- voice-led storytelling
+- visual moodboarding
+- creator research that should compound instead of disappearing into saved folders
 
-- **`plugins/obsidian-audit/`** — an Obsidian plugin: select text in any page, leave a comment with severity, the comment is written into `audit/` as an anchored markdown file.
-- **`web/`** — a local Node.js preview server: renders the wiki with mermaid, KaTeX, and wikilinks, lets you select + file feedback from the browser, and shows open audits per page.
+The core product call is:
 
-Both tools share a single TypeScript library (`audit-shared/`) so audit files written from Obsidian and the web viewer are byte-identical in shape.
+- markdown vault as source of truth
+- custom web app as the main surface
+- Obsidian as studio/debug mode
 
-## Install
+So the system is designed around:
+
+1. capture
+2. analyze
+3. compile
+4. browse
+5. generate
+
+## Current State
+
+What exists today:
+
+- A local web app with 5 surfaces:
+  - `Home`
+  - `Capture`
+  - `References`
+  - `Idea Studio`
+  - `Studio`
+- A filesystem-backed creator vault that is scaffolded automatically
+- Capture flow for:
+  - URL only
+  - URL + note
+  - URL + note + uploaded assets
+- Local analysis pipeline:
+  - text-first by default
+  - hybrid when uploaded media exists
+- Compilation into markdown pages for:
+  - `wiki/references/`
+  - `wiki/themes/`
+  - `wiki/motifs/`
+  - `wiki/creators/`
+  - `wiki/formats/`
+  - `wiki/snapshots/`
+  - `wiki/style-constitution.md`
+  - `wiki/not-me.md`
+- JSON app outputs for snapshot and references
+- Existing Studio mode preserved for:
+  - page browsing
+  - graph view
+  - audit filing
+  - audit resolution
+- Obsidian audit plugin still in the repo
+
+What is still intentionally incomplete:
+
+- no hosted sync
+- no auth
+- no billing
+- no Instagram Saved auto-sync
+- no mobile shell
+- no real LLM-backed idea generation yet
+- no production-grade multimodal video understanding provider integrated yet
+
+## How It Works
+
+Aftertaste keeps a local vault on disk and writes product state as files.
+
+When you save a capture:
+
+1. the raw capture is written to `raw/inbox/` and `raw/captures/`
+2. optional uploaded media is written to `raw/media/<capture-id>/`
+3. local analysis generates themes, motifs, formats, and creator signals
+4. the compiler updates markdown pages inside `wiki/`
+5. the web app reads the compiled output back through JSON APIs
+
+That means the app is inspectable and portable.
+
+The vault is the product memory.
+
+## Repo Layout
+
+```text
+aftertaste/
+├── audit-shared/            # Shared audit schema + serializer
+├── llm-wiki/                # Original skill/docs lineage and reference material
+├── plugins/
+│   └── obsidian-audit/      # Obsidian plugin for filing audits into the vault
+├── web/                     # Current Aftertaste web app and server
+│   ├── client/              # SPA shell and Studio UI
+│   ├── server/              # Express APIs, vault services, markdown rendering
+│   └── shared/              # Client/server contracts
+└── local-vault/             # Example local vault used during development
+```
+
+## Running It
+
+### 1. Install dependencies
 
 ```bash
-# Copy the skill into your agent's skills directory
-cp -r llm-wiki/ ~/.claude/skills/llm-wiki/
-# or for Codex
-cp -r llm-wiki/ ~/.codex/skills/llm-wiki/
-```
-
-Then reference it in your agent config, or simply paste `llm-wiki/SKILL.md` into your agent context.
-
-## Quick start
-
-```bash
-# 1. Scaffold a new wiki
-python3 llm-wiki/scripts/scaffold.py ~/my-wiki "My Research Topic"
-
-# 2. Add a source
-cp my-article.md ~/my-wiki/raw/articles/
-
-# 3. Tell your agent: "ingest raw/articles/my-article.md"
-
-# 4. Ask questions: "what does the wiki say about X?"
-
-# 5. Run lint periodically
-python3 llm-wiki/scripts/lint_wiki.py ~/my-wiki
-
-# 6. File a comment from the web viewer or Obsidian plugin, then process it
-python3 llm-wiki/scripts/audit_review.py ~/my-wiki --open
-# then tell the agent: "audit: process the open comments"
-```
-
-## Repo contents
-
-```
-llm-wiki-skill/
-├── llm-wiki/                    ← The skill
-│   ├── SKILL.md                 ← Main skill file (read by agent)
-│   ├── references/
-│   │   ├── schema-guide.md      ← CLAUDE.md schema template
-│   │   ├── article-guide.md     ← Article writing (divide & conquer, mermaid, KaTeX)
-│   │   ├── log-guide.md         ← log/ folder convention
-│   │   ├── audit-guide.md       ← audit file format + processing workflow
-│   │   └── tooling-tips.md      ← Obsidian, qmd, plugin + web
-│   └── scripts/
-│       ├── scaffold.py          ← Bootstrap new wiki directory
-│       ├── lint_wiki.py         ← 7-pass health check (links, audit, log shape)
-│       └── audit_review.py      ← Group open/resolved audits by target
-├── audit-shared/                ← Shared TypeScript library
-│   └── src/{schema,anchor,id,serialize,index}.ts
-├── plugins/obsidian-audit/      ← Obsidian plugin — file audit from vault
-└── web/                         ← Local Node.js preview + feedback server
-    ├── server/                  ← Express + markdown-it + KaTeX + wikilinks
-    └── client/                  ← Vanilla-TS SPA with mermaid + selection popover
-```
-
-## Running the web viewer
-
-```bash
-# one-time setup (builds audit-shared, installs deps, bundles client)
-cd audit-shared && npm install && npm run build && cd ..
-cd web && npm install && npm run build && cd ..
-
-# start the server against a wiki
-cd web
-npm start -- --wiki "/path/to/your/wiki-root" --port 4175
-# open http://127.0.0.1:4175
-```
-
-## Building the Obsidian plugin
-
-```bash
-cd audit-shared && npm install && npm run build && cd ..
-cd plugins/obsidian-audit
+cd audit-shared
 npm install
 npm run build
-npm run link -- "/path/to/your/Obsidian vault"
-# Enable 'LLM Wiki Audit' in Obsidian → Settings → Community plugins.
+
+cd ../web
+npm install
 ```
 
-## Use cases
+### 2. Start the app against a real vault directory
 
-- **Research deep-dive** — reading papers/articles on a topic over weeks
-- **Personal wiki** — Farzapedia-style: journal entries compiled into personal encyclopedia  
-- **Team knowledge base** — fed by Slack threads, meeting notes, docs
-- **Reading companion** — building a rich companion wiki as you read a book
+If you want to use the included local dev vault:
 
-## Related work
+```bash
+cd /Users/brilliantaksan/Developer/aftertaste/web
+npm start -- --wiki /Users/brilliantaksan/Developer/aftertaste/local-vault --port 4175
+```
 
-- [Karpathy's original Gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)
-- [pedronauck/skills karpathy-kb](https://github.com/pedronauck/skills/tree/main/skills/karpathy-kb) — full Obsidian vault integration
-- [Astro-Han/karpathy-llm-wiki](https://github.com/Astro-Han/karpathy-llm-wiki) — example implementation
-- [qmd](https://github.com/tobi/qmd) — semantic search for Markdown wikis
+Or point it at any other existing directory:
+
+```bash
+cd web
+npm start -- --wiki "/absolute/path/to/your/vault" --port 4175
+```
+
+Important:
+
+- `--wiki` must point to a real directory
+- if the directory is empty, Aftertaste scaffolds the vault structure for you
+- if the directory does not exist, the server exits with an error
+
+Then open:
+
+```text
+http://127.0.0.1:4175
+```
+
+## First Test Flow
+
+To test the MVP manually:
+
+1. Open `Capture`
+2. Paste a URL
+3. Add a short note like `love the soft voiceover and close-up pacing`
+4. Optionally upload screenshots or a short video
+5. Submit
+6. Check `Home` for the updated snapshot
+7. Check `References` for the compiled entry and filters
+8. Check `Idea Studio` for generated hooks/scripts/shot lists
+9. Check `Studio` to inspect the underlying wiki and graph
+
+## API Surfaces
+
+Main product APIs:
+
+- `POST /api/captures`
+- `GET /api/captures`
+- `GET /api/captures/:id`
+- `POST /api/captures/:id/analyze`
+- `POST /api/compile`
+- `GET /api/snapshot/current`
+- `GET /api/references`
+- `POST /api/ideas`
+
+Studio / wiki APIs kept from the original stack:
+
+- `GET /api/tree`
+- `GET /api/graph`
+- `GET /api/page`
+- `GET /api/raw`
+- `GET /api/audit`
+- `POST /api/audit`
+- `PATCH /api/audit/:id/resolve`
+
+## Testing
+
+```bash
+cd web
+npm test
+npm exec tsc -- --noEmit
+npm run build
+```
+
+Current automated coverage focuses on:
+
+- link-only capture
+- capture with note + upload
+- compile output
+- references filtering
+- idea outputs citing source references
+
+## Vault Shape
+
+A running Aftertaste vault currently looks like this:
+
+```text
+<vault>/
+├── CLAUDE.md
+├── audit/
+├── log/
+├── outputs/
+│   ├── app/
+│   └── ideas/
+├── raw/
+│   ├── captures/
+│   ├── inbox/
+│   └── media/
+└── wiki/
+    ├── creators/
+    ├── formats/
+    ├── motifs/
+    ├── references/
+    ├── snapshots/
+    ├── themes/
+    ├── index.md
+    ├── not-me.md
+    └── style-constitution.md
+```
+
+## Design Intent
+
+The web UI is aiming for:
+
+- warm, low-pressure visual language
+- sparse chrome
+- content-first cards
+- snapshot-driven homepage instead of graph-first UX
+- Obsidian kept as a power-user/studio layer, not the main emotional surface
+
+## Roadmap
+
+Likely next steps:
+
+- replace heuristic idea generation with real LLM-backed generation
+- add provider adapters for richer media analysis
+- improve bundle size by lazy-loading Studio tooling
+- improve capture ingestion for real creator workflows
+- add stronger vault schema and starter content
+- build a better mobile-first capture path
+
+## Lineage
+
+This project still builds on the Karpathy-style `llm-wiki` pattern:
+
+- raw sources
+- compiled markdown wiki
+- queryable and auditable artifact
+
+But the product direction here is now specifically Aftertaste, not a generic wiki skill.
 
 ## License
 
