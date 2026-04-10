@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Aftertaste</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Manrope:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/katex/katex.min.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="site-header">
+        <div class="brand-block">
+          <span class="brand-mark"></span>
+          <div>
+            <span class="eyebrow">Taste-led knowledge base</span>
+            <strong id="brand-label">Aftertaste</strong>
+            <p id="brand-meta">Local vault</p>
+          </div>
+        </div>
+        <nav class="site-nav">
+          <button class="nav-pill is-active" type="button" data-nav-view="home">Home</button>
+          <button class="nav-pill" type="button" data-nav-view="capture">Capture</button>
+          <button class="nav-pill" type="button" data-nav-view="references">References</button>
+          <button class="nav-pill" type="button" data-nav-view="ideas">Idea Studio</button>
+          <button class="nav-pill" type="button" data-nav-view="studio">Studio</button>
+        </nav>
+      </header>
+
+      <main class="view-stack">
+        <section id="view-home" class="view-panel" data-view-panel="home"></section>
+        <section id="view-capture" class="view-panel hidden" data-view-panel="capture"></section>
+        <section id="view-references" class="view-panel hidden" data-view-panel="references"></section>
+        <section id="view-ideas" class="view-panel hidden" data-view-panel="ideas"></section>
+
+        <section id="view-studio" class="view-panel hidden" data-view-panel="studio">
+          <div class="studio-shell">
+            <header class="studio-topbar">
+              <div class="studio-heading">
+                <span class="eyebrow">Studio mode</span>
+                <strong id="wiki-title">wiki/index.md</strong>
+              </div>
+              <div class="studio-actions">
+                <button id="btn-graph" class="pill-btn" type="button" title="Knowledge graph (G)">Graph</button>
+                <button id="btn-refresh" class="pill-btn pill-btn-muted" type="button" title="Refresh">Refresh</button>
+              </div>
+            </header>
+
+            <div class="studio-grid">
+              <aside id="sidebar-left" class="surface-card studio-column">
+                <header class="surface-head">
+                  <div>
+                    <span class="eyebrow">Studio</span>
+                    <h2>Navigation</h2>
+                  </div>
+                </header>
+                <nav id="tree"><p class="loading">Loading studio</p></nav>
+              </aside>
+
+              <section class="surface-card studio-main">
+                <article id="page-content"><p class="loading">Loading page</p></article>
+              </section>
+
+              <aside id="sidebar-right" class="surface-card studio-column">
+                <header class="surface-head">
+                  <div>
+                    <span class="eyebrow">Audit</span>
+                    <h2>Open feedback</h2>
+                  </div>
+                </header>
+                <div id="audit-list"><p class="loading">Loading audits</p></div>
+              </aside>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="feedback-popover" class="hidden">
+      <button id="feedback-trigger" class="pill-btn pill-btn-solid" type="button">Add feedback</button>
+    </div>
+
+    <dialog id="feedback-dialog">
+      <form id="feedback-form" method="dialog">
+        <div class="dialog-inner">
+          <header class="surface-head">
+            <div>
+              <span class="eyebrow">Audit</span>
+              <h2>New feedback</h2>
+            </div>
+          </header>
+          <label class="field">
+            <span>Selected text</span>
+            <pre id="feedback-preview"></pre>
+          </label>
+          <div class="field">
+            <span>Severity</span>
+            <div id="feedback-severity" class="severity-grid">
+              <label data-sev="info"><input type="radio" name="severity" value="info" /><span class="signal-chip">info</span></label>
+              <label data-sev="suggest"><input type="radio" name="severity" value="suggest" /><span class="signal-chip">suggest</span></label>
+              <label data-sev="warn"><input type="radio" name="severity" value="warn" checked /><span class="signal-chip">warn</span></label>
+              <label data-sev="error"><input type="radio" name="severity" value="error" /><span class="signal-chip">error</span></label>
+            </div>
+          </div>
+          <label class="field">
+            <span>Comment</span>
+            <textarea id="feedback-comment" rows="6" placeholder="Explain what needs to change."></textarea>
+          </label>
+          <div class="form-actions">
+            <button type="button" id="feedback-cancel" class="pill-btn">Cancel</button>
+            <button type="submit" id="feedback-save" class="pill-btn pill-btn-solid">Save feedback</button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="graph-overlay" class="hidden">
+      <div class="graph-panel">
+        <header class="surface-head">
+          <div>
+            <span class="eyebrow">Studio graph</span>
+            <h2>Knowledge graph</h2>
+          </div>
+          <div class="studio-actions">
+            <button id="graph-reset" class="pill-btn" type="button">Reset</button>
+            <button id="graph-close" class="pill-btn pill-btn-muted" type="button">Close</button>
+          </div>
+        </header>
+        <div id="graph-svg-wrap">
+          <canvas id="graph-particles"></canvas>
+          <svg id="graph-svg"></svg>
+          <div class="graph-hint">drag nodes · scroll to zoom · click to open</div>
+          <div class="graph-legend">
+            <div class="legend-row"><span class="legend-dot references"></span> references</div>
+            <div class="legend-row"><span class="legend-dot themes"></span> themes</div>
+            <div class="legend-row"><span class="legend-dot motifs"></span> motifs</div>
+            <div class="legend-row"><span class="legend-dot creators"></span> creators</div>
+            <div class="legend-row"><span class="legend-dot formats"></span> formats</div>
+            <div class="legend-row"><span class="legend-dot snapshots"></span> snapshots</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/assets/main.js"></script>
+  </body>
+</html>

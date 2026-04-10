@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "paths": {
+      "audit-shared": ["../audit-shared/src/index.ts"]
+    },
+    "types": ["node"]
+  },
+  "include": ["server/**/*.ts", "client/**/*.ts", "shared/**/*.ts", "build-client.mjs"],
+  "exclude": ["node_modules", "dist"]
+}
