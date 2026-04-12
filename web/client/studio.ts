@@ -249,7 +249,7 @@ function configureMermaid(): void {
     startOnLoad: false,
     theme: "base",
     securityLevel: "loose",
-    fontFamily: "Manrope, system-ui, sans-serif",
+    fontFamily: "Satoshi, Maison Neue, system-ui, sans-serif",
     themeVariables: {
       background: "#f5efe5",
       primaryColor: "#efe5d4",

@@ -4,6 +4,7 @@ import type {
   CaptureRecord,
   IdeaOutputType,
   IdeaResponse,
+  PersonalMoment,
   ReferenceSummary,
   ReferencesResponse,
   SignalTag,
@@ -202,7 +203,8 @@ function renderHeader(): void {
   if (brandLabel) brandLabel.textContent = state.config?.productName ?? "Aftertaste";
   if (brandMeta) {
     const refCount = state.catalog.references.length;
-    brandMeta.textContent = `${state.config?.wikiTitle ?? "Local vault"} · ${refCount} reference${refCount === 1 ? "" : "s"}`;
+    const memoryLabel = refCount === 1 ? "memory" : "memories";
+    brandMeta.textContent = `${state.config?.wikiTitle ?? "Local vault"} · ${refCount} ${memoryLabel}`;
   }
 }
 
@@ -213,29 +215,43 @@ function renderHomeView(): void {
   const referenceCount = state.catalog.references.length;
   const captureCount = state.captures.length;
   const topPlatforms = state.catalog.filters.platforms.slice(0, 3).map((item) => item.label).join(" · ") || "No sources yet";
+  const leadTheme = snapshot.themes[0]?.label ?? "Taste signal forming";
+  const leadMotif = snapshot.motifs[0]?.label ?? "A visual instinct is starting to repeat";
+  const leadPattern = snapshot.creatorPatterns[0]?.label ?? "A recognizable voice is still emerging";
   container.innerHTML = `
-    <section class="hero-card">
+    <section class="hero-card hero-card-memory">
       <div class="hero-copy">
-        <span class="eyebrow">Weekly taste snapshot</span>
-        <h1>This is what your archive feels like lately.</h1>
+        <span class="eyebrow">Private taste snapshot</span>
+        <h1>Remember what your taste keeps reaching for.</h1>
         <p class="hero-summary">${escapeHtml(snapshot.summary)}</p>
+        <p class="hero-meta-line">${referenceCount} references saved locally · ${captureCount} captures processed · ${escapeHtml(topPlatforms)}</p>
         <div class="hero-actions">
           <button class="pill-btn pill-btn-solid" id="home-capture">Capture something</button>
           <button class="pill-btn" id="home-ideas">Turn this into ideas</button>
           <button class="pill-btn pill-btn-muted" id="home-studio">Open Studio</button>
         </div>
       </div>
-      <div class="hero-aside">
-        <div class="stat-card">
-          <span class="stat-label">Saved archive</span>
+      <div class="memory-board">
+        <article class="memory-note note-peach">
+          <span class="note-label">dominant theme</span>
+          <strong>${escapeHtml(leadTheme)}</strong>
+          <p>${escapeHtml(snapshot.window.label)} archive weather with a calm emphasis on what you keep saving, not how you file it.</p>
+        </article>
+        <article class="memory-note note-blue">
+          <span class="note-label">what keeps resurfacing</span>
+          <strong>${escapeHtml(leadMotif)}</strong>
+          <div class="memory-mini-pills">${renderMiniSignalPills(snapshot.motifs.slice(0, 3))}</div>
+        </article>
+        <article class="memory-note note-cream">
+          <span class="note-label">saved lately</span>
           <strong>${referenceCount}</strong>
-          <span class="stat-meta">${captureCount} capture${captureCount === 1 ? "" : "s"} processed locally</span>
-        </div>
-        <div class="stat-card">
-          <span class="stat-label">Where it comes from</span>
-          <strong>${escapeHtml(topPlatforms)}</strong>
-          <span class="stat-meta">${snapshot.window.label} · ${snapshot.window.start} to ${snapshot.window.end}</span>
-        </div>
+          <p>${captureCount} recent capture${captureCount === 1 ? "" : "s"} processed into a local, portable vault.</p>
+        </article>
+        <article class="memory-note note-rose">
+          <span class="note-label">voice signature</span>
+          <strong>${escapeHtml(leadPattern)}</strong>
+          <div class="memory-mini-pills">${renderMiniSignalPills(snapshot.themes.slice(0, 3))}</div>
+        </article>
       </div>
     </section>
 
@@ -244,7 +260,7 @@ function renderHomeView(): void {
         <header class="surface-head">
           <div>
             <span class="eyebrow">Themes</span>
-            <h2>Threads you keep pulling</h2>
+            <h2>Threads your archive keeps pulling</h2>
           </div>
         </header>
         <div class="signal-cloud">${renderSignalChips(snapshot.themes)}</div>
@@ -254,7 +270,7 @@ function renderHomeView(): void {
         <header class="surface-head">
           <div>
             <span class="eyebrow">Motifs</span>
-            <h2>Craft moves that keep returning</h2>
+            <h2>Craft moves you seem to trust instinctively</h2>
           </div>
         </header>
         <div class="signal-cloud">${renderSignalChips(snapshot.motifs)}</div>
@@ -266,7 +282,7 @@ function renderHomeView(): void {
         <header class="surface-head">
           <div>
             <span class="eyebrow">Pattern read</span>
-            <h2>A few things your archive is saying back</h2>
+            <h2>A few things your archive is quietly saying back</h2>
           </div>
         </header>
         <div class="pattern-list">
@@ -289,7 +305,7 @@ function renderHomeView(): void {
         <header class="surface-head">
           <div>
             <span class="eyebrow">Prompt seeds</span>
-            <h2>Quick ways to turn taste into output</h2>
+            <h2>Ways to turn memory into output</h2>
           </div>
         </header>
         <div class="prompt-list">
@@ -371,7 +387,7 @@ function renderCaptureView(): void {
         <header class="surface-head">
           <div>
             <span class="eyebrow">Capture</span>
-            <h1>Save first. Let the system understand later.</h1>
+            <h1>Save first. Let meaning arrive after.</h1>
           </div>
         </header>
         <form id="capture-form" class="capture-form">
@@ -401,7 +417,7 @@ function renderCaptureView(): void {
         <header class="surface-head">
           <div>
             <span class="eyebrow">Recent activity</span>
-            <h2>Latest captures</h2>
+            <h2>Fresh memories entering the vault</h2>
           </div>
         </header>
         <div class="capture-history">
@@ -422,7 +438,7 @@ function renderCaptureView(): void {
             <h2>${escapeHtml(result.reference?.title ?? result.capture.metadata.title ?? "New reference added")}</h2>
           </div>
         </header>
-        <p>${escapeHtml(result.analysis?.summary ?? "The capture was saved and compiled into the vault.")}</p>
+        <p>${escapeHtml(result.analysis?.summary ?? "The capture was saved and folded back into the archive.")}</p>
         <div class="signal-cloud">${renderSignalChips(result.analysis?.themes ?? [])}</div>
         <div class="hero-actions">
           <button class="pill-btn pill-btn-solid" id="capture-view-home">See snapshot</button>
@@ -510,7 +526,7 @@ function renderReferencesView(): void {
       <header class="surface-head">
         <div>
           <span class="eyebrow">References</span>
-          <h1>Browse the compiled archive, not just a pile of saves.</h1>
+          <h1>Find the things you half remember by feeling.</h1>
         </div>
       </header>
       <form id="reference-filters" class="filter-bar">
@@ -611,7 +627,7 @@ function renderIdeasView(): void {
         <header class="surface-head">
           <div>
             <span class="eyebrow">Idea Studio</span>
-            <h1>Turn this week's taste into something you can actually make.</h1>
+            <h1>Turn this week's taste into something quietly precise.</h1>
           </div>
         </header>
         <p class="lede">${escapeHtml(state.snapshot.summary)}</p>
@@ -688,7 +704,7 @@ function renderIdeasView(): void {
       <div class="idea-output-grid">
         ${
           state.ideas
-            ? state.ideas.outputs.map((output) => renderIdeaCard(output.title, output.body, output.rationale, output.citations)).join("")
+            ? state.ideas.outputs.map((output) => renderIdeaCard(output.title, output.body, output.rationale, output.citations, output.personalMoments ?? [])).join("")
             : `<p class="empty-copy">Pick a format, select a few references, and generate an idea set.</p>`
         }
       </div>
@@ -847,13 +863,35 @@ function renderReferenceDetail(reference: ReferenceSummary): string {
   `;
 }
 
-function renderIdeaCard(title: string, body: string, rationale: string, citations: string[]): string {
+function renderIdeaBody(body: string): string {
+  const markerRe = /\[(YOUR LINE|YOUR MOMENT): ([^\]]+)\]/g;
+  const parts: string[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = markerRe.exec(body)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(escapeHtml(body.slice(lastIndex, match.index)));
+    }
+    const prompt = match[2]!;
+    parts.push(
+      `<span class="personal-prompt"><span class="personal-prompt-label">your words</span>${escapeHtml(prompt)}</span>`,
+    );
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < body.length) {
+    parts.push(escapeHtml(body.slice(lastIndex)));
+  }
+  return parts.join("");
+}
+
+function renderIdeaCard(title: string, body: string, rationale: string, citations: string[], personalMoments: PersonalMoment[] = []): string {
+  const hasPrompts = personalMoments.length > 0;
   return `
-    <article class="idea-card">
+    <article class="idea-card${hasPrompts ? " idea-card-has-prompts" : ""}">
       <header>
         <strong>${escapeHtml(title)}</strong>
       </header>
-      <pre>${escapeHtml(body)}</pre>
+      <pre class="idea-body">${renderIdeaBody(body)}</pre>
       <p>${escapeHtml(rationale)}</p>
       <footer>${citations.length > 0 ? `Cites ${citations.map(escapeHtml).join(", ")}` : "No citations"}</footer>
     </article>
@@ -862,15 +900,27 @@ function renderIdeaCard(title: string, body: string, rationale: string, citation
 
 function renderSignalChips(signals: SignalTag[]): string {
   if (signals.length === 0) {
-    return `<span class="signal-chip signal-chip-empty">Not enough signal yet</span>`;
+    return `<span class="signal-chip signal-chip-empty">Still collecting signal</span>`;
   }
   return signals
     .map(
       (signal) => `
         <span class="signal-chip">
           <strong>${escapeHtml(signal.label)}</strong>
-          <small>${Math.round(signal.score * 100)}%</small>
         </span>
+      `,
+    )
+    .join("");
+}
+
+function renderMiniSignalPills(signals: SignalTag[]): string {
+  if (signals.length === 0) {
+    return `<span class="memory-mini-pill memory-mini-pill-empty">Still collecting signals</span>`;
+  }
+  return signals
+    .map(
+      (signal) => `
+        <span class="memory-mini-pill">${escapeHtml(signal.label)}</span>
       `,
     )
     .join("");

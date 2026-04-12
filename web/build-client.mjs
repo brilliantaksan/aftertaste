@@ -8,8 +8,28 @@ import url from "node:url";
 const here = path.dirname(url.fileURLToPath(import.meta.url));
 const outDir = path.join(here, "dist/client");
 const assetsDir = path.join(outDir, "assets");
+const staticDir = path.join(here, "client/static");
 
+fs.rmSync(outDir, { recursive: true, force: true });
 fs.mkdirSync(assetsDir, { recursive: true });
+
+/**
+ * @param {string} sourceDir
+ * @param {string} targetDir
+ */
+function copyDirRecursive(sourceDir, targetDir) {
+  if (!fs.existsSync(sourceDir)) return;
+  fs.mkdirSync(targetDir, { recursive: true });
+  for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+    const sourcePath = path.join(sourceDir, entry.name);
+    const targetPath = path.join(targetDir, entry.name);
+    if (entry.isDirectory()) {
+      copyDirRecursive(sourcePath, targetPath);
+    } else {
+      fs.copyFileSync(sourcePath, targetPath);
+    }
+  }
+}
 
 // Bundle main.ts → assets/main.js
 await esbuild.build({
@@ -28,5 +48,6 @@ await esbuild.build({
 // Copy static files.
 fs.copyFileSync(path.join(here, "client/index.html"), path.join(outDir, "index.html"));
 fs.copyFileSync(path.join(here, "client/styles.css"), path.join(assetsDir, "styles.css"));
+copyDirRecursive(staticDir, assetsDir);
 
 console.log(`✓ client bundled to ${outDir}`);
