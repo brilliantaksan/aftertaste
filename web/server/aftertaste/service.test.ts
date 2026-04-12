@@ -115,8 +115,42 @@ test("references can be filtered deterministically and idea outputs cite their s
   assert.ok(ideas.outputs.every((output) => output.citations.includes(first.capture.id)));
 });
 
+test("idea outputs include personal moment prompts that map back to scaffold placeholders", async () => {
+  const root = makeTempRoot();
+  globalThis.fetch = async () =>
+    new Response(
+      `<html><head><title>Memory reel</title><meta name="description" content="A reflective montage about distance, tenderness, and finding language for what keeps returning."></head></html>`,
+      { status: 200, headers: { "content-type": "text/html" } },
+    );
+
+  const capture = await createCapture(root, {
+    sourceUrl: "https://example.com/memory",
+    note: "soft voiceover about what keeps returning, with close-up details and slow pacing",
+  });
+
+  const ideas = generateIdeas(root, {
+    snapshotId: null,
+    referenceIds: [capture.capture.id],
+    outputType: "script",
+    brief: "",
+  });
+
+  assert.ok(ideas.outputs.length > 0);
+  for (const output of ideas.outputs) {
+    assert.ok(output.personalMoments.length > 0);
+    for (const prompt of output.personalMoments) {
+      assert.ok(prompt.prompt.length > 0);
+      assert.match(output.body, new RegExp(escapeRegExp(prompt.placeholder)));
+    }
+  }
+});
+
 function makeTempRoot(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "aftertaste-web-"));
   tempRoots.push(root);
   return root;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

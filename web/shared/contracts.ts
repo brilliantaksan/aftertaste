@@ -156,6 +156,11 @@ export interface IdeaRequest {
   brief: string;
 }
 
+export interface PersonalMoment {
+  placeholder: string;
+  prompt: string;
+}
+
 export interface IdeaDraft {
   id: string;
   title: string;
@@ -163,6 +168,7 @@ export interface IdeaDraft {
   citations: string[];
   rationale: string;
   outputType: IdeaOutputType;
+  personalMoments: PersonalMoment[];
 }
 
 export interface IdeaResponse {

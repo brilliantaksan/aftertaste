@@ -1145,6 +1145,20 @@ function selectIdeaReferences(
   return references.slice(0, 3);
 }
 
+function extractVoiceAnchors(references: ReferenceSummary[]): string[] {
+  const phrases: string[] = [];
+  for (const ref of references) {
+    if (!ref.note) continue;
+    // Split on punctuation boundaries and take short, usable fragments
+    const fragments = ref.note
+      .split(/[.,;—\n]+/)
+      .map((f) => f.trim())
+      .filter((f) => f.length > 8 && f.length < 80);
+    phrases.push(...fragments.slice(0, 2));
+  }
+  return phrases.slice(0, 3);
+}
+
 function buildIdeas(
   outputType: IdeaOutputType,
   brief: string,
@@ -1156,73 +1170,99 @@ function buildIdeas(
   const motif = snapshot.motifs[0]?.label ?? "Soft Pacing";
   const refTitles = references.map((reference) => reference.title);
   const citations = references.map((reference) => reference.id);
-  const briefLine = brief.trim() ? `Ground it in this brief: ${brief.trim()}` : "Keep it close to the current snapshot without over-explaining the feeling.";
+  const briefNote = brief.trim() ? brief.trim() : null;
+  const voiceAnchors = extractVoiceAnchors(references);
+  const anchorLine = voiceAnchors[0] ? `"${voiceAnchors[0]}"` : null;
 
   if (outputType === "hooks") {
-    return [
+    // Hooks: structural shapes grounded in the archive, with one personal moment prompt each
+    const hookShapes = [
       {
-        id: crypto.randomUUID(),
-        title: "Quiet reveal",
-        outputType,
-        citations,
-        rationale: `Built from ${theme.toLowerCase()} plus ${motif.toLowerCase()} and the latest saved references.`,
-        body: `1. "I thought distance would make this smaller. It made it louder."\n2. "Lately I keep filming the moments right before I say what I mean."\n3. "This is what discipline looks like when it still has a heartbeat."`,
+        label: "Quiet tension",
+        structure: `Opens on something small and specific — a detail, a gesture, a moment that doesn't explain itself yet.`,
+        anchor: anchorLine ?? `one possibility: a line about what ${theme.toLowerCase()} actually feels like from the inside`,
       },
       {
-        id: crypto.randomUUID(),
-        title: "Private admission",
-        outputType,
-        citations,
-        rationale: `Leans into ${secondaryTheme.toLowerCase()} while staying useful for short-form voice-led reels.`,
-        body: `1. "I keep saving the same feeling in different clothes."\n2. "Maybe the reel isn't about the trip. Maybe it's about what I keep carrying home."\n3. "I wanted this to feel cinematic, but it ended up feeling honest."`,
+        label: "Honest admission",
+        structure: `Starts with something you've been noticing but haven't said out loud. Grounded in ${secondaryTheme.toLowerCase()}.`,
+        anchor: voiceAnchors[1] ? `"${voiceAnchors[1]}"` : `one possibility: a line about the pattern you keep returning to`,
       },
       {
-        id: crypto.randomUUID(),
-        title: "Taste-to-brief opener",
-        outputType,
-        citations,
-        rationale: `Designed to bridge personal taste with a client or project context.`,
-        body: `1. "If I had to turn this week's taste into one frame, it would be ${theme.toLowerCase()} with ${motif.toLowerCase()}."\n2. "Everything I saved this week moved slowly and still landed hard."\n3. "I'm noticing a pattern: I trust softness more than spectacle."`,
+        label: "Taste-to-brief bridge",
+        structure: `Names what your archive has been orbiting this week — ${theme.toLowerCase()} + ${motif.toLowerCase()} — then turns it toward the project.`,
+        anchor: briefNote ? `Ground it here: ${briefNote}` : `one possibility: a line about what you trust more than spectacle`,
       },
     ];
+
+    return hookShapes.map((shape, i) => {
+      const pm = `[YOUR LINE: ${shape.anchor}]`;
+      return {
+        id: crypto.randomUUID(),
+        title: shape.label,
+        outputType,
+        citations,
+        rationale: `Shape ${i + 1} of 3 — drawn from the current archive and the ${theme.toLowerCase()} thread.`,
+        body: `${shape.structure}\n\n${pm}`,
+        personalMoments: [
+          { placeholder: pm, prompt: shape.anchor },
+        ],
+      };
+    });
   }
 
   if (outputType === "shotlist") {
+    const anchorBeat = `[YOUR MOMENT: the frame that carries the emotional center of this piece — what image keeps coming back to you?]`;
+    const briefBeat = briefNote ? `Brief: ${briefNote}` : `Keep it true to the ${theme.toLowerCase()} thread without over-explaining.`;
+
     return [
       {
         id: crypto.randomUUID(),
         title: "Five-beat intimate reel",
         outputType,
         citations,
-        rationale: `Translates ${theme.toLowerCase()} into a concrete capture plan with ${motif.toLowerCase()} cues.`,
+        rationale: `One possible shape that fits ${theme.toLowerCase()} and ${motif.toLowerCase()} — adjust any beat freely.`,
         body: [
-          "1. Establishing detail shot: hands, coffee steam, or train window for texture.",
-          "2. Mid close-up with slight handheld movement while the voiceover begins.",
-          "3. Insert of a saved reference object or place that carries the emotional center.",
-          "4. Static wide shot to let the line with the most tension breathe.",
-          "5. Final close-up or mirror shot with on-screen text that lands the takeaway.",
+          `1. Opening texture: a detail shot that sets the emotional temperature. (${motif.toLowerCase()} energy)`,
+          `2. Mid close-up — slight movement, something intimate. The voiceover starts here.`,
+          anchorBeat,
+          `4. One static wide to let the tension breathe. No movement.`,
+          `5. Close — text, silence, or a small action that lands the feeling without naming it.`,
           "",
-          briefLine,
+          briefBeat,
         ].join("\n"),
+        personalMoments: [
+          { placeholder: anchorBeat, prompt: "the frame that carries the emotional center of this piece — what image keeps coming back to you?" },
+        ],
       },
       {
         id: crypto.randomUUID(),
-        title: "Client-safe visual translation",
+        title: "Client-safe translation",
         outputType,
         citations,
-        rationale: `Keeps the same taste logic but reframes it for brand or freelance work.`,
+        rationale: `Same taste logic, reframed for a brand or freelance context. Reference anchors: ${refTitles.join(" · ") || "current snapshot"}.`,
         body: [
-          "1. Product or hero subject in soft morning light.",
-          "2. Human gesture shot to keep the piece from feeling sterile.",
-          "3. Slow push or glide across the environment.",
-          "4. Typography beat that mirrors the emotional line.",
-          "5. Closing frame with negative space for CTA or caption.",
+          `1. Subject or product in soft, available light — not staged.`,
+          `2. One human gesture to keep the piece from feeling sterile.`,
+          `3. Slow movement through the environment.`,
+          `[YOUR MOMENT: one frame from your references that captures the mood you want the client to feel]`,
+          `5. Closing frame with negative space — room for text or silence.`,
           "",
-          `Reference anchors: ${refTitles.join(" · ") || "current snapshot only"}.`,
+          briefBeat,
         ].join("\n"),
+        personalMoments: [
+          {
+            placeholder: `[YOUR MOMENT: one frame from your references that captures the mood you want the client to feel]`,
+            prompt: "one frame from your references that captures the mood you want the client to feel",
+          },
+        ],
       },
     ];
   }
+
+  // Script
+  const hookSlot = `[YOUR LINE: the feeling or observation that started this whole piece — in your words, not cleaned up]`;
+  const closeSlot = `[YOUR LINE: what you want someone to feel in the last three seconds — not what you want them to think]`;
+  const briefNote2 = briefNote ? `\nBrief context: ${briefNote}` : "";
 
   return [
     {
@@ -1230,34 +1270,44 @@ function buildIdeas(
       title: "Personal reel script",
       outputType,
       citations,
-      rationale: `Built from the current snapshot and the closest references without depending on an external model.`,
+      rationale: `One possible shape for a personal reel — built from ${theme.toLowerCase()} and ${secondaryTheme.toLowerCase()}. The marked lines are yours to write.`,
       body: [
         "Hook:",
-        `"I keep collecting the same feeling from different people until it finally sounds like me."`,
+        hookSlot,
         "",
         "Body:",
-        `This week the pattern feels like ${theme.toLowerCase()} and ${secondaryTheme.toLowerCase()}. The images move slowly, the words stay close to the skin, and everything keeps asking for ${motif.toLowerCase()}. ${briefLine}`,
+        `This week the archive keeps returning to ${theme.toLowerCase()} and ${secondaryTheme.toLowerCase()}. The references move through ${motif.toLowerCase()} — slowly, close to the skin. One possibility: let the middle section follow that rhythm without rushing toward a conclusion.${briefNote2}`,
         "",
         "Close:",
-        `"Maybe that's what taste really is. Not what you save, but what keeps returning."`,
+        closeSlot,
       ].join("\n"),
+      personalMoments: [
+        { placeholder: hookSlot, prompt: "the feeling or observation that started this whole piece — in your words, not cleaned up" },
+        { placeholder: closeSlot, prompt: "what you want someone to feel in the last three seconds — not what you want them to think" },
+      ],
     },
     {
       id: crypto.randomUUID(),
-      title: "Client pitch script",
+      title: "Client concept script",
       outputType,
       citations,
-      rationale: `Uses the same taste signals but frames them as a concise concept statement.`,
+      rationale: `Uses the same taste signals reframed as a concept brief. Reference anchors: ${refTitles.join(" · ") || "current snapshot"}.`,
       body: [
         "Opening:",
-        `"The direction here is quiet confidence, not loud polish."`,
+        `One possibility: name the emotional direction before naming the visual. Something like — the feeling this piece is after is ${theme.toLowerCase()}, not performance.`,
         "",
         "Core:",
-        `We'll borrow the emotional temperature of ${theme.toLowerCase()} and the pacing logic of ${motif.toLowerCase()}. That gives the piece room to feel premium without losing intimacy.`,
+        `The visual grammar borrows from ${motif.toLowerCase()} — the archive has been leaning that way. That gives the piece room to feel considered without losing warmth.${briefNote2}`,
         "",
         "Close:",
-        `"The result should feel remembered, not merely watched."`,
+        `[YOUR LINE: one sentence that tells the client what you want viewers to walk away carrying]`,
       ].join("\n"),
+      personalMoments: [
+        {
+          placeholder: `[YOUR LINE: one sentence that tells the client what you want viewers to walk away carrying]`,
+          prompt: "one sentence that tells the client what you want viewers to walk away carrying",
+        },
+      ],
     },
   ];
 }
