@@ -8,16 +8,26 @@ import { handleTree } from "./routes/tree.js";
 import { handlePage, handleRaw } from "./routes/pages.js";
 import { handleAuditList, handleAuditCreate, handleAuditResolve } from "./routes/audit.js";
 import {
+  handleBriefCreate,
+  handleBriefDetail,
+  handleBriefList,
   handleCaptureAnalyze,
   handleCaptureCreate,
+  handleCaptureDelete,
   handleCaptureDetail,
   handleCaptureList,
   handleCompile,
   handleIdeas,
+  handleQueryIndex,
+  handleRelatedReferences,
   handleReferences,
   handleSnapshotCurrent,
+  handleWikiArticle,
+  handleWikiCleanupApply,
+  handleWikiCleanupPreview,
+  handleWikiLint,
 } from "./routes/aftertaste.js";
-import { handleGraph } from "./routes/graph.js";
+import { handleGraph, handleTasteGraph } from "./routes/graph.js";
 
 const cfg = parseArgs(process.argv);
 ensureAftertasteWorkspace(cfg.wikiRoot);
@@ -29,13 +39,24 @@ app.use(express.json({ limit: "16mb" }));
 app.get("/api/captures", handleCaptureList(cfg));
 app.post("/api/captures", handleCaptureCreate(cfg));
 app.get("/api/captures/:id", handleCaptureDetail(cfg));
+app.delete("/api/captures/:id", handleCaptureDelete(cfg));
 app.post("/api/captures/:id/analyze", handleCaptureAnalyze(cfg));
 app.post("/api/compile", handleCompile(cfg));
+app.get("/api/wiki/article", handleWikiArticle(cfg));
+app.get("/api/wiki/lint", handleWikiLint(cfg));
+app.post("/api/wiki/cleanup/preview", handleWikiCleanupPreview(cfg));
+app.post("/api/wiki/cleanup/apply", handleWikiCleanupApply(cfg));
 app.get("/api/snapshot/current", handleSnapshotCurrent(cfg));
 app.get("/api/references", handleReferences(cfg));
+app.get("/api/references/:id/related", handleRelatedReferences(cfg));
+app.get("/api/query", handleQueryIndex(cfg));
+app.get("/api/briefs", handleBriefList(cfg));
+app.get("/api/briefs/:id", handleBriefDetail(cfg));
+app.post("/api/briefs", handleBriefCreate(cfg));
 app.post("/api/ideas", handleIdeas(cfg));
 app.get("/api/tree", handleTree(cfg));
 app.get("/api/graph", handleGraph(cfg));
+app.get("/api/graph/taste", handleTasteGraph(cfg));
 app.get("/api/page", handlePage(cfg));
 app.get("/api/raw", handleRaw(cfg));
 app.get("/api/audit", handleAuditList(cfg));

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Request, Response } from "express";
 import type { ServerConfig } from "../config.js";
+import { getTasteGraph } from "../aftertaste/service.js";
 
 export interface GraphNode {
   id: string; // path relative to wikiRoot, e.g. "wiki/concepts/Transformers.md"
@@ -118,5 +119,15 @@ function extractTitle(text: string): string | null {
 export function handleGraph(cfg: ServerConfig) {
   return (_req: Request, res: Response) => {
     res.json(buildGraph(cfg.wikiRoot));
+  };
+}
+
+export function handleTasteGraph(cfg: ServerConfig) {
+  return (_req: Request, res: Response) => {
+    try {
+      res.json(getTasteGraph(cfg.wikiRoot));
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
   };
 }
