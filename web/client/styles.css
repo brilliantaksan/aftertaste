@@ -563,8 +563,24 @@ button {
   color: var(--ink);
 }
 
+.signal-chip-button {
+  font: inherit;
+  cursor: pointer;
+  transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.signal-chip-button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(68, 83, 101, 0.22);
+  box-shadow: 0 10px 26px rgba(48, 59, 77, 0.08);
+}
+
 .signal-chip-empty {
   color: var(--ink-faint);
+}
+
+.signal-evidence-list strong {
+  color: var(--ink);
 }
 
 .pattern-list,
@@ -2392,5 +2408,1523 @@ body {
 
   .site-sidebar-meta {
     grid-template-columns: 1fr;
+  }
+}
+
+/* 2026 visual overhaul */
+:root {
+  --pointer-x: 70vw;
+  --pointer-y: 20vh;
+}
+
+@keyframes shell-grid-drift {
+  from {
+    background-position:
+      0 0,
+      0 0,
+      0 0;
+  }
+  to {
+    background-position:
+      44px 44px,
+      -32px 22px,
+      0 0;
+  }
+}
+
+@keyframes orbit-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@keyframes finale-glow {
+  from {
+    transform: translate(-50%, -50%) scale(0.94);
+    opacity: 0.58;
+  }
+  to {
+    transform: translate(-50%, -50%) scale(1.06);
+    opacity: 1;
+  }
+}
+
+body {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.42), transparent 18%),
+    radial-gradient(circle at 12% 12%, rgba(245, 215, 168, 0.66), transparent 28%),
+    radial-gradient(circle at 84% 14%, rgba(205, 226, 255, 0.72), transparent 24%),
+    radial-gradient(circle at 74% 82%, rgba(255, 205, 221, 0.56), transparent 22%),
+    radial-gradient(circle at 10% 84%, rgba(216, 239, 222, 0.48), transparent 24%),
+    linear-gradient(180deg, #fffaf5 0%, #f7f0e7 48%, #f3ece3 100%);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background:
+    radial-gradient(340px circle at var(--pointer-x) var(--pointer-y), rgba(255, 255, 255, 0.62), transparent 58%),
+    linear-gradient(rgba(68, 83, 101, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(68, 83, 101, 0.05) 1px, transparent 1px);
+  background-size:
+    auto,
+    44px 44px,
+    44px 44px;
+  animation: shell-grid-drift 26s linear infinite;
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  right: -6rem;
+  top: 18vh;
+  width: 32rem;
+  height: 32rem;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.56), transparent 34%),
+    radial-gradient(circle at 50% 50%, rgba(205, 226, 255, 0.46), transparent 58%),
+    radial-gradient(circle at 70% 65%, rgba(255, 205, 221, 0.34), transparent 62%);
+  filter: blur(56px);
+  z-index: -1;
+  pointer-events: none;
+}
+
+.page-shell {
+  width: min(1600px, calc(100vw - 1.25rem));
+  grid-template-columns: 1fr;
+  gap: 1.15rem;
+  padding: 1rem 0 2.5rem;
+}
+
+.site-header {
+  position: sticky;
+  top: 1rem;
+  z-index: 12;
+  grid-template-columns: minmax(260px, 1.15fr) minmax(340px, 1fr) minmax(320px, 1.15fr);
+  align-items: center;
+  gap: 1rem;
+  min-height: auto;
+  padding: 1rem 1.1rem;
+  border-radius: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.78);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.64), rgba(250, 246, 240, 0.76));
+  backdrop-filter: blur(24px);
+  box-shadow:
+    0 28px 80px rgba(48, 59, 77, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.site-header::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.62), transparent 16%),
+    radial-gradient(circle at 12% 12%, rgba(245, 215, 168, 0.22), transparent 20%);
+}
+
+.site-sidebar-head,
+.site-nav,
+.site-sidebar-meta {
+  position: relative;
+  z-index: 1;
+}
+
+.brand-block strong {
+  font-size: clamp(2rem, 2.8vw, 3rem);
+}
+
+.brand-block p {
+  max-width: 28ch;
+}
+
+.site-nav {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.55rem;
+}
+
+.nav-pill {
+  width: auto;
+  min-height: 3.15rem;
+  padding: 0.95rem 1.1rem;
+  font-size: 0.95rem;
+  background: rgba(255, 255, 255, 0.52);
+}
+
+.site-sidebar-meta {
+  margin-top: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.sidebar-card {
+  min-height: 100%;
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.68), rgba(249, 245, 239, 0.72));
+}
+
+.sidebar-card strong {
+  font-size: clamp(1.4rem, 1.8vw, 2.15rem);
+}
+
+.sidebar-card-wide {
+  grid-column: auto;
+}
+
+.workspace-shell {
+  gap: 1.15rem;
+}
+
+.workspace-topbar {
+  position: sticky;
+  top: 6.35rem;
+  z-index: 10;
+  border-radius: 32px;
+  background: rgba(255, 255, 255, 0.56);
+  backdrop-filter: blur(22px);
+  box-shadow:
+    0 20px 50px rgba(48, 59, 77, 0.09),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.workspace-heading strong {
+  font-size: clamp(2.3rem, 3.8vw, 4rem);
+}
+
+.workspace-pill {
+  min-height: 2.6rem;
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.surface-card,
+.hero-card,
+.graph-panel {
+  border-radius: 34px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(250, 246, 240, 0.78));
+  box-shadow:
+    0 28px 72px rgba(48, 59, 77, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.82),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.26);
+}
+
+.surface-card {
+  padding: 1.45rem;
+}
+
+.surface-card::before,
+.hero-card::before,
+.graph-panel::before {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.64), transparent 14%),
+    radial-gradient(circle at 16% 10%, rgba(245, 215, 168, 0.18), transparent 18%);
+}
+
+.hero-card-orbit {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  grid-template-columns: minmax(0, 1.28fr) minmax(320px, 0.92fr);
+  gap: 1.1rem;
+  min-height: 36rem;
+  padding: 1.5rem;
+}
+
+.hero-orbit-grid {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(rgba(68, 83, 101, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(68, 83, 101, 0.06) 1px, transparent 1px);
+  background-size: 40px 40px;
+  mask-image: linear-gradient(180deg, transparent, black 16%, black 84%, transparent);
+  -webkit-mask-image: linear-gradient(180deg, transparent, black 16%, black 84%, transparent);
+  animation: shell-grid-drift 18s linear infinite;
+  opacity: 0.65;
+}
+
+.hero-card-orbit::after {
+  content: "";
+  position: absolute;
+  right: -6rem;
+  top: -5rem;
+  width: 26rem;
+  height: 26rem;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 35% 35%, rgba(255, 255, 255, 0.52), transparent 32%),
+    radial-gradient(circle at 50% 50%, rgba(205, 226, 255, 0.34), transparent 56%),
+    radial-gradient(circle at 55% 68%, rgba(245, 215, 168, 0.3), transparent 60%);
+  filter: blur(28px);
+  pointer-events: none;
+}
+
+.hero-copy-orbit,
+.hero-side-stack {
+  position: relative;
+  z-index: 1;
+}
+
+.hero-copy-orbit {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.hero-copy-orbit h1 {
+  font-size: clamp(3.3rem, 6.7vw, 7rem);
+  line-height: 0.9;
+  max-width: 9.5ch;
+}
+
+.hero-summary {
+  font-size: 1.04rem;
+  max-width: 60ch;
+}
+
+.hero-side-stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.hero-glass-card {
+  position: relative;
+  overflow: hidden;
+  padding: 1.15rem;
+  border-radius: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.56), rgba(251, 247, 241, 0.7));
+  backdrop-filter: blur(18px);
+  box-shadow:
+    0 20px 54px rgba(48, 59, 77, 0.09),
+    inset 0 1px 0 rgba(255, 255, 255, 0.76);
+}
+
+.hero-glass-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.44), transparent 20%);
+}
+
+.hero-card-head,
+.hero-metric-block,
+.hero-progress-stack {
+  position: relative;
+  z-index: 1;
+}
+
+.hero-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.hero-card-head h2 {
+  margin: 0.32rem 0 0;
+  font-family: var(--font-display);
+  font-size: clamp(1.55rem, 2.1vw, 2.1rem);
+  font-weight: 400;
+  line-height: 1.02;
+  letter-spacing: -0.045em;
+}
+
+.hero-card-kicker,
+.hero-tag,
+.orbit-marquee-item,
+.hero-metric-label,
+.hero-mini-stat span {
+  font-family: var(--font-mono);
+}
+
+.hero-card-kicker {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  padding: 0.45rem 0.72rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(68, 83, 101, 0.12);
+  color: var(--ink-soft);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.hero-metric-block {
+  display: grid;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.hero-metric-value {
+  display: block;
+  font-family: var(--font-display);
+  font-size: clamp(3.5rem, 5vw, 4.8rem);
+  line-height: 0.88;
+  letter-spacing: -0.06em;
+}
+
+.hero-metric-label {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--ink-faint);
+  font-size: 0.76rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.hero-progress-stack {
+  display: grid;
+  gap: 0.62rem;
+}
+
+.hero-progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+}
+
+.hero-progress-row strong {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hero-progress-track {
+  overflow: hidden;
+  height: 0.58rem;
+  border-radius: 999px;
+  background: rgba(39, 51, 67, 0.08);
+}
+
+.hero-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--gold), var(--rose));
+}
+
+.hero-progress-track-mint span {
+  background: linear-gradient(90deg, var(--mint), var(--blue));
+}
+
+.hero-mini-grid,
+.hero-stat-band {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.hero-mini-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.hero-mini-stat {
+  padding: 0.82rem;
+  text-align: center;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.54);
+  border: 1px solid rgba(68, 83, 101, 0.1);
+}
+
+.hero-mini-stat strong {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 1.7rem;
+  line-height: 0.94;
+}
+
+.hero-mini-stat span {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--ink-faint);
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.hero-tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.hero-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2rem;
+  padding: 0.42rem 0.72rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.64);
+  border: 1px solid rgba(68, 83, 101, 0.1);
+  color: var(--ink-soft);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hero-tag-live::before {
+  content: "";
+  width: 0.46rem;
+  height: 0.46rem;
+  border-radius: 999px;
+  background: #80b791;
+  box-shadow: 0 0 0 0.28rem rgba(128, 183, 145, 0.16);
+}
+
+.hero-stat-band {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.hero-stat-tile {
+  position: relative;
+  overflow: hidden;
+  padding: 1rem;
+  border-radius: 24px;
+  border: 1px solid rgba(68, 83, 101, 0.1);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(249, 245, 239, 0.76));
+  box-shadow: 0 14px 34px rgba(48, 59, 77, 0.07);
+}
+
+.hero-stat-tile strong {
+  display: block;
+  margin-top: 0.4rem;
+  font-family: var(--font-display);
+  font-size: clamp(1.75rem, 2.2vw, 2.45rem);
+  line-height: 0.96;
+  letter-spacing: -0.05em;
+}
+
+.hero-stat-tile p {
+  margin: 0.55rem 0 0;
+  color: var(--ink-soft);
+  line-height: 1.55;
+}
+
+.hero-marquee-card {
+  justify-content: space-between;
+}
+
+.orbit-marquee,
+.home-finale-marquee {
+  position: relative;
+  overflow: hidden;
+  mask-image: linear-gradient(90deg, transparent, black 10%, black 90%, transparent);
+  -webkit-mask-image: linear-gradient(90deg, transparent, black 10%, black 90%, transparent);
+}
+
+.orbit-marquee-track,
+.home-finale-marquee-track {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  width: max-content;
+  animation: orbit-marquee 30s linear infinite;
+}
+
+.orbit-marquee-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 2.7rem;
+  padding: 0.72rem 0.98rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(68, 83, 101, 0.12);
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.orbit-marquee-item::after {
+  content: "";
+  width: 0.38rem;
+  height: 0.38rem;
+  border-radius: 999px;
+  background: rgba(39, 51, 67, 0.22);
+}
+
+.memory-board-compact {
+  min-height: auto;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 0.75rem;
+}
+
+.memory-board-compact .memory-note {
+  min-height: 0;
+  transform: none;
+  margin-top: 0;
+}
+
+.memory-board-compact .memory-note-feature {
+  grid-row: auto;
+}
+
+.home-stage {
+  display: grid;
+  gap: 1rem;
+}
+
+.home-grid-bottom {
+  grid-template-columns: minmax(0, 1.3fr) minmax(300px, 0.9fr);
+}
+
+.reference-strip-wide {
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+}
+
+.surface-card-spotlight,
+.surface-card-story {
+  overflow: hidden;
+}
+
+.surface-card-spotlight::after,
+.surface-card-story::after {
+  content: "";
+  position: absolute;
+  right: -4rem;
+  top: -3rem;
+  width: 12rem;
+  height: 12rem;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.42), transparent 64%);
+  filter: blur(12px);
+  pointer-events: none;
+}
+
+.reference-card,
+.reference-strip-card,
+.prompt-card,
+.pattern-card,
+.history-card,
+.idea-card,
+.idea-reference-card,
+.idea-session-card,
+.context-strip,
+.article-context-card,
+.lint-card,
+.capture-guideline,
+.reference-check,
+.brief-summary-card {
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(250, 246, 241, 0.78));
+  box-shadow: 0 14px 34px rgba(48, 59, 77, 0.07);
+}
+
+.reference-card-active {
+  transform: translateY(-4px);
+  border-color: rgba(39, 51, 67, 0.18);
+  box-shadow: 0 22px 60px rgba(48, 59, 77, 0.12);
+}
+
+.field input,
+.field select,
+.field textarea,
+#feedback-preview {
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    0 8px 20px rgba(48, 59, 77, 0.04);
+}
+
+.capture-layout,
+.reference-layout,
+.ideas-layout,
+.studio-grid {
+  gap: 1.1rem;
+}
+
+.capture-composer,
+.ideas-builder,
+.reference-detail,
+.studio-topbar,
+#sidebar-left,
+#sidebar-right,
+.studio-main,
+.success-panel {
+  border-radius: 32px;
+}
+
+.capture-sidecard,
+.ideas-builder,
+.reference-detail {
+  top: 9.2rem;
+}
+
+.studio-topbar {
+  top: 9rem;
+}
+
+#sidebar-left,
+#sidebar-right {
+  top: 14.2rem;
+  max-height: calc(100vh - 15.2rem);
+}
+
+.studio-main {
+  min-height: calc(100vh - 15.2rem);
+}
+
+.home-finale {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 24rem;
+  padding: 1.2rem 1.35rem 1.5rem;
+  border-radius: 38px;
+  border: 1px solid rgba(39, 51, 67, 0.08);
+  background: linear-gradient(160deg, rgba(39, 51, 67, 0.94), rgba(53, 69, 89, 0.88));
+  box-shadow: 0 30px 86px rgba(48, 59, 77, 0.2);
+  color: #fffaf1;
+}
+
+.home-finale::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 52%;
+  width: min(70vw, 56rem);
+  height: 18rem;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(245, 215, 168, 0.24) 0%, rgba(205, 226, 255, 0.18) 35%, transparent 68%);
+  filter: blur(20px);
+  animation: finale-glow 7s ease-in-out infinite alternate;
+}
+
+.home-finale-marquee {
+  margin-inline: -0.3rem;
+  border-block: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  transform: rotate(-1.4deg) scale(1.02);
+}
+
+.home-finale-marquee-track {
+  padding: 0.82rem 0;
+  animation-duration: 26s;
+}
+
+.home-finale-marquee .orbit-marquee-item {
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 251, 244, 0.82);
+}
+
+.home-finale-content {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 1rem;
+  max-width: 44rem;
+  padding-top: 3rem;
+}
+
+.home-finale .eyebrow {
+  color: rgba(255, 251, 244, 0.62);
+}
+
+.home-finale h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(2.5rem, 5vw, 4.8rem);
+  font-weight: 400;
+  line-height: 0.92;
+  letter-spacing: -0.05em;
+}
+
+.home-finale p {
+  margin: 0;
+  max-width: 48ch;
+  color: rgba(255, 251, 244, 0.74);
+  line-height: 1.7;
+}
+
+.home-finale .pill-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #fffaf1;
+}
+
+.home-finale .pill-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.home-finale .pill-btn-solid {
+  background: linear-gradient(145deg, #fff8ea, #f5d7a8);
+  color: var(--accent);
+}
+
+.home-finale-word {
+  position: absolute;
+  right: 1rem;
+  bottom: -0.7rem;
+  font-family: var(--font-display);
+  font-size: clamp(4.8rem, 16vw, 14rem);
+  line-height: 0.8;
+  letter-spacing: -0.08em;
+  color: rgba(255, 255, 255, 0.05);
+  pointer-events: none;
+}
+
+@media (max-width: 1320px) {
+  .site-header {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .site-nav,
+  .site-sidebar-meta {
+    grid-column: 1 / -1;
+  }
+
+  .site-nav {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 1100px) {
+  .page-shell {
+    width: min(100vw - 0.9rem, 100%);
+  }
+
+  .site-header,
+  .workspace-topbar,
+  .capture-sidecard,
+  .ideas-builder,
+  .reference-detail,
+  .studio-topbar,
+  #sidebar-left,
+  #sidebar-right {
+    position: static;
+  }
+
+  .hero-card-orbit,
+  .stack-grid,
+  .home-grid-bottom,
+  .capture-layout,
+  .reference-layout,
+  .ideas-layout,
+  .studio-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .hero-stat-band,
+  .hero-mini-grid,
+  .memory-board-compact,
+  .site-sidebar-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-topbar {
+    top: 1rem;
+  }
+}
+
+@media (max-width: 780px) {
+  .site-nav {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .nav-pill {
+    width: 100%;
+  }
+
+  .hero-copy-orbit h1 {
+    font-size: clamp(2.5rem, 13vw, 4.6rem);
+    max-width: none;
+  }
+
+  .hero-actions,
+  .form-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .home-finale-word {
+    font-size: clamp(4.5rem, 26vw, 8rem);
+  }
+
+  .orbit-marquee-item {
+    min-height: 2.45rem;
+    font-size: 0.7rem;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   CINEMATIC OVERHAUL
+   Inspired by: glassmorphism-trust-hero · CinematicFooter · InfiniteGrid
+   Preserves: Louize / Satoshi / Maison Neue fonts · Cream palette · CSS vars
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── NEW KEYFRAMES ────────────────────────────────────────────────── */
+
+/* GPU grid drift — animates transform only (zero repaint per frame).
+   Replaces shell-grid-drift which animated background-position (repaint).
+   Element must be oversized by one tile so the loop is seamless. */
+@keyframes grid-drift-gpu {
+  from { transform: translate(0, 0); }
+  to   { transform: translate(40px, 40px); }
+}
+
+/* Same for 56px-tile grid used in the finale section */
+@keyframes grid-drift-gpu-lg {
+  from { transform: translate(0, 0); }
+  to   { transform: translate(56px, 56px); }
+}
+
+/* Ambient aurora — transform + opacity only */
+@keyframes aurora-breathe {
+  0%, 100% { transform: scale(1) translate(0%, 0%); opacity: 0.72; }
+  33%       { transform: scale(1.04) translate(1.5%, 1%); opacity: 0.88; }
+  66%       { transform: scale(0.97) translate(-1%, 2%); opacity: 0.78; }
+}
+
+/* Hero card entry — transform + opacity only */
+@keyframes hero-reveal {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Live dot pulse — opacity only */
+@keyframes dot-live-pulse {
+  0%, 100% { opacity: 0.65; }
+  50%       { opacity: 1; }
+}
+
+/* ── BODY — Richer cream backdrop + bigger mouse-reveal ───────────── */
+body {
+  background:
+    radial-gradient(circle at 14% 10%, rgba(245, 215, 168, 0.62) 0%, transparent 30%),
+    radial-gradient(circle at 88% 13%, rgba(205, 226, 255, 0.70) 0%, transparent 26%),
+    radial-gradient(circle at 76% 80%, rgba(255, 205, 221, 0.54) 0%, transparent 24%),
+    radial-gradient(circle at  8% 88%, rgba(216, 239, 222, 0.46) 0%, transparent 24%),
+    linear-gradient(180deg, #fffaf5 0%, #f8f1e8 50%, #f3ece3 100%);
+}
+
+/* Spotlight only — no grid, no animation. JS updates --pointer-x/y each frame.
+   Keeping it animation-free means zero per-frame work for the browser. */
+body::before {
+  background:
+    radial-gradient(520px circle at var(--pointer-x, 50%) var(--pointer-y, 50%),
+      rgba(255, 255, 255, 0.72), transparent 65%);
+  background-size: auto;
+  animation: none;
+}
+
+/* GPU grid — lives on .page-shell::before so it can be oversized + transform-animated.
+   Oversized by one tile (40px) on each side so the looping translate is seamless.
+   transform is GPU-composited: zero repaint, zero layout. */
+.page-shell::before {
+  content: "";
+  position: fixed;
+  top: -40px;
+  left: -40px;
+  width: calc(100% + 80px);
+  height: calc(100% + 80px);
+  z-index: -3;
+  pointer-events: none;
+  background:
+    linear-gradient(rgba(68, 83, 101, 0.065) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(68, 83, 101, 0.065) 1px, transparent 1px);
+  background-size: 40px 40px;
+  animation: grid-drift-gpu 22s linear infinite;
+  will-change: transform;
+}
+
+/* Right-side aurora glow: breathes via transform+opacity */
+body::after {
+  right: -10rem;
+  top: 8vh;
+  width: 44rem;
+  height: 44rem;
+  background:
+    radial-gradient(circle at 34% 30%, rgba(255, 241, 204, 0.76) 0%, transparent 40%),
+    radial-gradient(circle at 56% 62%, rgba(205, 226, 255, 0.54) 0%, transparent 56%),
+    radial-gradient(circle at 74% 74%, rgba(255, 205, 221, 0.40) 0%, transparent 60%);
+  filter: blur(72px);
+  animation: aurora-breathe 20s ease-in-out infinite;
+  will-change: transform;
+}
+
+/* ── SITE HEADER — Deeper glass, cinematic weight ─────────────────── */
+.site-header {
+  backdrop-filter: blur(36px) saturate(180%);
+  -webkit-backdrop-filter: blur(36px) saturate(180%);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.76) 0%, rgba(251, 247, 241, 0.88) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.94);
+  box-shadow:
+    0 48px 110px rgba(48, 59, 77, 0.11),
+    0  8px  24px rgba(48, 59, 77, 0.05),
+    inset 0 2px 0 rgba(255, 255, 255, 0.98),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.44);
+  /* Promote to own compositor layer — avoids scroll repaints with backdrop-filter */
+  transform: translateZ(0);
+  will-change: transform;
+}
+
+.site-header::before {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.66) 0%, transparent 18%),
+    radial-gradient(circle at 10% 50%, rgba(245, 215, 168, 0.22) 0%, transparent 22%),
+    radial-gradient(circle at 90% 50%, rgba(205, 226, 255, 0.16) 0%, transparent 18%);
+}
+
+/* Brand mark: expanded warm halo */
+.brand-mark {
+  width: 34px;
+  height: 34px;
+  background: linear-gradient(145deg, #ffd48a, #ffb488);
+  box-shadow: 0 0 0 6px rgba(255, 208, 155, 0.30), 0 0 0 12px rgba(255, 208, 155, 0.10);
+}
+
+/* Sidebar chips: subtle glass */
+.sidebar-chip {
+  backdrop-filter: blur(10px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.84), 0 3px 8px rgba(48, 59, 77, 0.04);
+}
+
+/* Nav pills: spring micro-interaction */
+.nav-pill {
+  transition:
+    transform   340ms cubic-bezier(0.16, 1, 0.3, 1),
+    background  150ms ease,
+    border-color 150ms ease,
+    box-shadow  200ms ease;
+}
+
+.nav-pill:hover {
+  transform: translateY(-2px) scale(1.02);
+  background: rgba(255, 255, 255, 0.84);
+  border-color: rgba(68, 83, 101, 0.18);
+  box-shadow: 0 12px 32px rgba(48, 59, 77, 0.09), inset 0 1px 0 rgba(255, 255, 255, 0.92);
+}
+
+.nav-pill.is-active {
+  background: linear-gradient(145deg, #263241, #1a2534);
+  box-shadow:
+    0 16px 40px rgba(26, 35, 48, 0.30),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.nav-pill.is-active::after {
+  background: rgba(245, 215, 168, 1);
+  box-shadow: 0 0 0 3px rgba(245, 215, 168, 0.24);
+}
+
+/* Sidebar stat cards: deeper glass + hover lift */
+.sidebar-card {
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.88);
+  background: linear-gradient(200deg, rgba(255, 255, 255, 0.76) 0%, rgba(250, 245, 239, 0.82) 100%);
+  box-shadow:
+    0 18px 44px rgba(48, 59, 77, 0.08),
+    inset 0 2px 0 rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.32);
+  transition: transform 280ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 200ms ease;
+}
+
+.sidebar-card:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    0 26px 60px rgba(48, 59, 77, 0.10),
+    inset 0 2px 0 rgba(255, 255, 255, 0.98);
+}
+
+/* ── WORKSPACE TOPBAR — Deeper glass ─────────────────────────────── */
+.workspace-topbar {
+  backdrop-filter: blur(32px) saturate(165%);
+  -webkit-backdrop-filter: blur(32px) saturate(165%);
+  border: 1px solid rgba(255, 255, 255, 0.88);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72) 0%, rgba(251, 247, 241, 0.84) 100%);
+  box-shadow:
+    0 30px 76px rgba(48, 59, 77, 0.10),
+    inset 0 2px 0 rgba(255, 255, 255, 0.96),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.32);
+  transform: translateZ(0);
+  will-change: transform;
+}
+
+/* ── SURFACE CARDS — Premium glass depth ─────────────────────────── */
+.surface-card,
+.hero-card,
+.graph-panel {
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  border-color: rgba(255, 255, 255, 0.92);
+  box-shadow:
+    0 38px 92px rgba(48, 59, 77, 0.10),
+    0 10px 28px rgba(48, 59, 77, 0.05),
+    inset 0 2px 0 rgba(255, 255, 255, 0.96),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.30);
+}
+
+/* ── HERO ORBIT GRID — GPU transform animation ────────────────────────
+   Override inset: 0 → negative to allow transform-based loop.
+   Parent .hero-card-orbit has overflow:hidden so the overhang is clipped. */
+.hero-orbit-grid {
+  inset: -40px;
+  opacity: 0.82;
+  background:
+    linear-gradient(rgba(68, 83, 101, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(68, 83, 101, 0.08) 1px, transparent 1px);
+  background-size: 40px 40px;
+  animation: grid-drift-gpu 15s linear infinite;
+  will-change: transform;
+}
+
+/* ── HERO GLASS CARDS — Cinematic depth (glassmorphism-trust-hero) ── */
+.hero-glass-card {
+  backdrop-filter: blur(34px) saturate(170%);
+  -webkit-backdrop-filter: blur(34px) saturate(170%);
+  border: 1px solid rgba(255, 255, 255, 0.88);
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.76) 0%, rgba(251, 246, 240, 0.86) 100%);
+  padding: 1.4rem;
+  box-shadow:
+    0 36px 84px rgba(48, 59, 77, 0.12),
+    0 10px 28px rgba(48, 59, 77, 0.06),
+    inset 0 2px 0 rgba(255, 255, 255, 0.98),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+}
+
+.hero-glass-card::before {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.52) 0%, transparent 22%);
+}
+
+/* Spotlight card: top-right corner glow */
+.hero-glass-card-spotlight::after {
+  content: "";
+  position: absolute;
+  top: -4rem;
+  right: -4rem;
+  width: 20rem;
+  height: 20rem;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(245, 215, 168, 0.48) 0%, transparent 68%);
+  filter: blur(34px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ── PROGRESS TRACKS — Glowing fills ─────────────────────────────── */
+.hero-progress-track {
+  height: 0.72rem;
+  background: rgba(39, 51, 67, 0.07);
+}
+
+.hero-progress-track span {
+  background: linear-gradient(90deg, #f5d7a8, #f8a882);
+  box-shadow: 0 2px 10px rgba(245, 175, 120, 0.44);
+}
+
+.hero-progress-track-mint span {
+  background: linear-gradient(90deg, #a4ddb8, #8ec8e6);
+  box-shadow: 0 2px 10px rgba(142, 200, 230, 0.44);
+}
+
+/* ── HERO MINI STATS — Glass separators ──────────────────────────── */
+.hero-mini-stat {
+  background: rgba(255, 255, 255, 0.54);
+  border: 1px solid rgba(255, 255, 255, 0.80);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.88), 0 6px 16px rgba(48, 59, 77, 0.05);
+  transition:
+    transform   280ms cubic-bezier(0.16, 1, 0.3, 1),
+    background  150ms ease;
+}
+
+.hero-mini-stat:hover {
+  transform: translateY(-2px);
+  background: rgba(255, 255, 255, 0.80);
+}
+
+/* ── HERO LIVE TAG — Pulsing dot ─────────────────────────────────── */
+.hero-tag-live::before {
+  animation: dot-live-pulse 2.2s ease-in-out infinite;
+}
+
+/* ── HERO STAT TILES — Card with hover lift ──────────────────────── */
+.hero-stat-tile {
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.84);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.76) 0%, rgba(250, 246, 240, 0.80) 100%);
+  box-shadow: 0 14px 34px rgba(48, 59, 77, 0.07), inset 0 1px 0 rgba(255, 255, 255, 0.92);
+  transition:
+    transform   280ms cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow  200ms ease;
+}
+
+.hero-stat-tile:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 24px 58px rgba(48, 59, 77, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.96);
+}
+
+/* ── MARQUEE — Fade-edge mask + GPU promotion ─────────────────────── */
+.orbit-marquee {
+  mask-image: linear-gradient(to right, transparent 0%, black 16%, black 84%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, black 16%, black 84%, transparent 100%);
+}
+
+/* The track is what actually animates — promote it so translateX is compositor-only */
+.orbit-marquee-track {
+  will-change: transform;
+}
+
+.orbit-marquee-item {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.84);
+}
+
+/* ── HOME FINALE — Cinematic section (CinematicFooter inspired) ──── */
+.home-finale {
+  min-height: 38rem;
+  border-radius: 48px;
+  background:
+    radial-gradient(ellipse at 50% 62%,
+      rgba(245, 215, 168, 0.12) 0%,
+      rgba(205, 226, 255, 0.10) 40%,
+      transparent 72%),
+    linear-gradient(155deg,
+      rgba(22, 31, 43, 0.97) 0%,
+      rgba(33, 44, 60, 0.96) 55%,
+      rgba(42, 56, 74, 0.94) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow:
+    0 60px 140px rgba(22, 31, 43, 0.36),
+    0 14px 36px rgba(22, 31, 43, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  padding: 0 1.5rem 2rem;
+}
+
+/* Animated grid inside finale — GPU transform, same oversized trick.
+   Parent has overflow:hidden, so the -56px overhang is clipped cleanly. */
+.home-finale::before {
+  inset: -56px;
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  transform: none;
+  filter: none;
+  /* Grid lines */
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.038) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.038) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: linear-gradient(to bottom, transparent 0%, black 20%, black 80%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 20%, black 80%, transparent 100%);
+  animation: grid-drift-gpu-lg 30s linear infinite;
+  will-change: transform;
+  z-index: 0;
+}
+
+/* Ensure all direct children sit above the grid overlay */
+.home-finale-marquee {
+  position: relative;
+  z-index: 1;
+}
+
+.home-finale-word {
+  z-index: 1;
+}
+
+/* Giant background word — text-stroke + gradient clip (CinematicFooter) */
+.home-finale-word {
+  font-size: clamp(5.5rem, 20vw, 18rem);
+  color: transparent;
+  -webkit-text-stroke: 1px rgba(255, 255, 255, 0.055);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.09) 0%, transparent 65%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  right: -0.5rem;
+  bottom: -2rem;
+  letter-spacing: -0.10em;
+}
+
+/* Diagonal marquee: more dramatic rotation + backdrop */
+.home-finale-marquee {
+  transform: rotate(-2.2deg) scale(1.06);
+  border-color: rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.045);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+
+/* CTA buttons: glass + spring hover */
+.home-finale .pill-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(10px);
+  transition:
+    transform   320ms cubic-bezier(0.16, 1, 0.3, 1),
+    background  150ms ease,
+    box-shadow  200ms ease;
+}
+
+.home-finale .pill-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  transform: translateY(-3px) scale(1.02);
+  box-shadow: 0 20px 48px rgba(22, 31, 43, 0.36);
+}
+
+.home-finale .pill-btn-solid {
+  background: linear-gradient(145deg, rgba(255, 248, 222, 0.97), rgba(245, 215, 168, 0.94));
+  border: none;
+  box-shadow: 0 10px 30px rgba(245, 175, 120, 0.38);
+}
+
+.home-finale .pill-btn-solid:hover {
+  background: linear-gradient(145deg, #fffdf0, #f8d898);
+  box-shadow: 0 22px 54px rgba(245, 175, 120, 0.48);
+}
+
+/* ── CONTENT CARDS — GPU hover: ::after opacity trick ─────────────────
+   Problem: box-shadow in transition = paint every frame.
+   Fix: pre-render the hover shadow in a ::after at opacity 0.
+   On hover, only opacity changes (GPU-composited). Zero repaint. */
+.pattern-card,
+.prompt-card,
+.history-card,
+.idea-card,
+.reference-card,
+.reference-strip-card {
+  position: relative;
+  border-color: rgba(255, 255, 255, 0.78);
+  /* Only transform — no box-shadow in transition */
+  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Pre-rendered hover shadow — always painted, opacity controls visibility */
+.pattern-card::after,
+.prompt-card::after,
+.history-card::after,
+.idea-card::after,
+.reference-card::after,
+.reference-strip-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 20px 50px rgba(48, 59, 77, 0.12);
+  opacity: 0;
+  transition: opacity 200ms ease;
+  pointer-events: none;
+  z-index: -1;
+}
+
+.pattern-card:hover,
+.prompt-card:hover,
+.history-card:hover,
+.idea-card:hover,
+.reference-card:hover,
+.reference-strip-card:hover {
+  transform: translateY(-2px);
+}
+
+.pattern-card:hover::after,
+.prompt-card:hover::after,
+.history-card:hover::after,
+.idea-card:hover::after,
+.reference-card:hover::after,
+.reference-strip-card:hover::after {
+  opacity: 1;
+}
+
+/* ── SIGNAL CHIPS — Transform + opacity only ─────────────────────── */
+.signal-chip {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.84);
+}
+
+.signal-chip-button {
+  transition:
+    transform    200ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 150ms ease;
+}
+
+.signal-chip-button:hover {
+  transform: translateY(-2px);
+}
+
+/* ── PILL BUTTONS — Transform only, no box-shadow in transition ────── */
+.pill-btn {
+  transition:
+    transform    220ms cubic-bezier(0.16, 1, 0.3, 1),
+    background   150ms ease,
+    border-color 150ms ease;
+}
+
+.pill-btn:hover {
+  transform: translateY(-2px);
+}
+
+/* Active = instantaneous press feedback, no spring */
+.pill-btn:active {
+  transform: translateY(0);
+  transition-duration: 80ms;
+}
+
+.pill-btn-solid {
+  background: linear-gradient(145deg, #334155, #1b2c3d);
+  box-shadow:
+    0 14px 36px rgba(26, 35, 48, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+/* Only background changes on solid hover — no box-shadow transition */
+.pill-btn-solid:hover {
+  background: linear-gradient(145deg, #3e5068, #243646);
+}
+
+/* ── WORKSPACE PILLS — Status only, not interactive ─────────────────── */
+.workspace-pill {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.84);
+}
+
+/* ── FORM INPUTS — Focus ring only ─────────────────────────────────── */
+.field input,
+.field select,
+.field textarea,
+#feedback-preview {
+  transition:
+    border-color 150ms ease,
+    box-shadow   150ms ease;
+}
+
+.field input:focus,
+.field select:focus,
+.field textarea:focus {
+  transform: translateY(-1px);
+  border-color: rgba(65, 87, 121, 0.40);
+  box-shadow: 0 0 0 4px rgba(205, 226, 255, 0.56), 0 8px 24px rgba(48, 59, 77, 0.07);
+}
+
+/* ── HOME STAGE — Hero card entrance only ─────────────────────────────
+   Only the primary hero card gets an entrance animation.
+   GPU layer promotion via will-change set before animation fires. */
+.hero-card-orbit {
+  animation: hero-reveal 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: 0.04s;
+  will-change: transform, opacity;
+}
+
+/* ── COMPACT HEADER ──────────────────────────────────────────────────
+   The header was too tall because of:
+   1. Brand block: 3 stacked rows (eyebrow + name + meta) + chip row below
+   2. Nav pills: min-height 3.15rem with large padding
+   3. Stat cards: eyebrow + large number + description = 3 rows each
+   Fix: flatten each section to a single visual row.                    */
+
+/* Tighter shell */
+.site-header {
+  padding: 0.6rem 0.9rem;
+  border-radius: 26px;
+  gap: 0.85rem;
+}
+
+/* Brand: hide eyebrow label, meta paragraph, and chip row — just mark + name */
+.site-sidebar-head .eyebrow,
+.brand-block p,
+.sidebar-chip-row {
+  display: none;
+}
+
+.brand-block strong {
+  font-size: clamp(1.2rem, 1.55vw, 1.55rem);
+  margin-top: 0;
+}
+
+.brand-mark {
+  width: 26px;
+  height: 26px;
+  box-shadow: 0 0 0 5px rgba(255, 208, 155, 0.26), 0 0 0 9px rgba(255, 208, 155, 0.09);
+}
+
+/* Nav pills: tighter */
+.nav-pill {
+  min-height: 2.3rem;
+  padding: 0.5rem 0.85rem;
+  font-size: 0.88rem;
+}
+
+/* Stat cards: collapse to inline — number + label on one line, no description */
+.sidebar-card {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.5rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 18px;
+}
+
+/* Eyebrow becomes the trailing label, sits beside the number */
+.sidebar-card .eyebrow {
+  order: 2;
+  font-size: 0.68rem;
+  letter-spacing: 0.18em;
+}
+
+.sidebar-card strong {
+  order: 1;
+  font-size: clamp(0.95rem, 1.15vw, 1.1rem);
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+/* Hide the description paragraph — too much text for a compact bar */
+.sidebar-card p {
+  display: none;
+}
+
+/* Workspace topbar: adjust sticky offset to match slimmer header */
+.workspace-topbar {
+  top: 4.85rem;
+}
+
+/* ── HERO HEADLINE — fill the column ─────────────────────────────────
+   Before: max-width: 9.5ch was cutting lines short of the column edge.
+   font-size ceiling of 7rem wasn't scaling on wider screens.
+   Fix: remove max-width so text wraps to the full column width.
+   Raise the ceiling so it scales with the viewport. The 1.5rem padding
+   on .hero-card-orbit already provides the safety margins. */
+.hero-copy-orbit h1 {
+  font-size: clamp(3.5rem, 8vw, 9.5rem);
+  max-width: 100%;
+  line-height: 0.88;
+}
+
+/* ── RESPONSIVE ─────────────────────────────────────────────────────── */
+@media (max-width: 860px) {
+  .home-finale {
+    border-radius: 36px;
+    min-height: 30rem;
+  }
+  .home-finale-word {
+    font-size: clamp(4.5rem, 28vw, 9rem);
   }
 }

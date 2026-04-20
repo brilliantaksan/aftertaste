@@ -9,6 +9,7 @@ import type {
   ProjectBrief,
   QueryIndexEntry,
   QuerySearchResponse,
+  ReferenceMoment,
   ReferenceSummary,
   ReferencesResponse,
   SignalTag,
@@ -144,12 +145,12 @@ const viewChrome: Record<ViewName, { title: string; meta: string }> = {
     meta: "Search by feeling, inspect by signal, and keep the surrounding context visible.",
   },
   ideas: {
-    title: "Idea Studio",
-    meta: "Build from saved taste patterns with a persistent context rail and a clearer output stage.",
+    title: "Create Ideas",
+    meta: "Build hooks, scripts, and shot lists from saved taste patterns and active references.",
   },
   studio: {
-    title: "Wiki Studio",
-    meta: "Navigate the compiled vault directly when you need the full article and audit surface.",
+    title: "Wiki Explorer",
+    meta: "Browse the compiled vault directly when you need full pages, links, and audit context.",
   },
 };
 
@@ -158,6 +159,7 @@ let studioController: StudioController | null = null;
 async function main(): Promise<void> {
   state.config = await fetchJson<AppConfig>("/api/config");
   studioController = new StudioController({ author: state.config.author });
+  bindPointerLighting();
   bindGlobalNavigation();
   window.addEventListener("popstate", () => {
     void syncFromLocation();
@@ -201,7 +203,10 @@ async function refreshReferences(): Promise<void> {
   queryParams.append("kind", "constitution");
   queryParams.append("kind", "not-me");
   queryParams.append("kind", "brief");
-  queryParams.set("limit", "8");
+  queryParams.append("kind", "wiki-article");
+  queryParams.append("kind", "moment");
+  queryParams.append("kind", "creative-session");
+  queryParams.set("limit", "10");
   const queryUrl = `/api/query?${queryParams.toString()}`;
   const [references, memoryQuery] = await Promise.all([
     fetchJson<ReferencesResponse>(url),
@@ -335,73 +340,163 @@ function renderHomeView(): void {
   const leadPattern = snapshot.creatorPatterns[0]?.label ?? "A recognizable voice is still emerging";
   const promptSeedCount = snapshot.promptSeeds.length;
   const questionCount = snapshot.openQuestions.length;
+  const signalScore = Math.min(
+    98,
+    Math.max(24, Math.round(((snapshot.themes.length * 2 + snapshot.motifs.length + snapshot.creatorPatterns.length) / Math.max(1, referenceCount + 3)) * 28)),
+  );
+  const promptScore = Math.min(
+    96,
+    Math.max(18, Math.round((promptSeedCount / Math.max(1, promptSeedCount + questionCount + 1)) * 100)),
+  );
+  const marqueeItems = [
+    `${referenceCount} ${referenceCount === 1 ? "reference" : "references"}`,
+    `${captureCount} ${captureCount === 1 ? "capture" : "captures"}`,
+    leadTheme,
+    leadMotif,
+    leadPattern,
+    topPlatforms,
+  ];
   container.innerHTML = `
-    <section class="hero-card hero-card-memory">
-      <div class="hero-copy">
-        <div class="hero-chip-row">
-          <span class="workspace-pill workspace-pill-soft">Window · ${escapeHtml(snapshot.window.label)}</span>
-          <span class="workspace-pill workspace-pill-soft">${promptSeedCount} prompt seed${promptSeedCount === 1 ? "" : "s"}</span>
-          <span class="workspace-pill workspace-pill-soft">${questionCount} open question${questionCount === 1 ? "" : "s"}</span>
+    <section class="home-stage">
+      <section class="hero-card hero-card-orbit">
+        <div class="hero-orbit-grid" aria-hidden="true"></div>
+        <div class="hero-copy hero-copy-orbit">
+          <div class="hero-chip-row">
+            <span class="workspace-pill workspace-pill-soft">Window · ${escapeHtml(snapshot.window.label)}</span>
+            <span class="workspace-pill workspace-pill-soft">${promptSeedCount} prompt seed${promptSeedCount === 1 ? "" : "s"}</span>
+            <span class="workspace-pill workspace-pill-soft">${questionCount} open question${questionCount === 1 ? "" : "s"}</span>
+          </div>
+          <span class="eyebrow">Private taste operating system</span>
+          <h1>Build the next idea from what your archive already knows.</h1>
+          <p class="hero-summary">${escapeHtml(snapshot.summary)}</p>
+          <p class="hero-meta-line">${referenceCount} references saved locally · ${captureCount} captures processed · ${escapeHtml(topPlatforms)}</p>
+          <div class="hero-actions">
+            <button class="pill-btn pill-btn-solid" type="button" data-home-action="capture">Capture something</button>
+            <button class="pill-btn" type="button" data-home-action="ideas">Turn this into ideas</button>
+            <button class="pill-btn pill-btn-muted" type="button" data-home-action="studio">Browse Wiki</button>
+          </div>
+          <div class="hero-stat-band">
+            <article class="hero-stat-tile">
+              <span class="detail-label">Lead theme</span>
+              <strong>${escapeHtml(leadTheme)}</strong>
+              <p>${escapeHtml(snapshot.window.label)} archive weather with emphasis on what keeps resurfacing.</p>
+            </article>
+            <article class="hero-stat-tile">
+              <span class="detail-label">Motif pulse</span>
+              <strong>${escapeHtml(leadMotif)}</strong>
+              <p>The strongest craft move currently repeating across the snapshot.</p>
+            </article>
+            <article class="hero-stat-tile">
+              <span class="detail-label">Voice signature</span>
+              <strong>${escapeHtml(leadPattern)}</strong>
+              <p>${promptSeedCount} prompt seed${promptSeedCount === 1 ? "" : "s"} already phrased in the archive's own language.</p>
+            </article>
+          </div>
         </div>
-        <span class="eyebrow">Private taste snapshot</span>
-        <h1>Remember what your taste keeps reaching for.</h1>
-        <p class="hero-summary">${escapeHtml(snapshot.summary)}</p>
-        <p class="hero-meta-line">${referenceCount} references saved locally · ${captureCount} captures processed · ${escapeHtml(topPlatforms)}</p>
-        <div class="hero-actions">
-          <button class="pill-btn pill-btn-solid" id="home-capture">Capture something</button>
-          <button class="pill-btn" id="home-ideas">Turn this into ideas</button>
-          <button class="pill-btn pill-btn-muted" id="home-studio">Open Studio</button>
-        </div>
-      </div>
-      <div class="memory-board">
-        <article class="memory-note memory-note-feature note-peach">
-          <span class="note-label">dominant theme</span>
-          <strong>${escapeHtml(leadTheme)}</strong>
-          <p>${escapeHtml(snapshot.window.label)} archive weather with a calm emphasis on what you keep saving, not how you file it.</p>
-          <div class="memory-mini-pills">${renderMiniSignalPills(snapshot.themes.slice(0, 3))}</div>
-        </article>
-        <article class="memory-note note-blue">
-          <span class="note-label">what keeps resurfacing</span>
-          <strong>${escapeHtml(leadMotif)}</strong>
-          <div class="memory-mini-pills">${renderMiniSignalPills(snapshot.motifs.slice(0, 3))}</div>
-        </article>
-        <article class="memory-note note-cream">
-          <span class="note-label">archive weather</span>
-          <strong>${referenceCount} saved</strong>
-          <p>${captureCount} recent capture${captureCount === 1 ? "" : "s"} processed into a local, portable vault across ${escapeHtml(topPlatforms)}.</p>
-        </article>
-        <article class="memory-note note-rose">
-          <span class="note-label">voice signature</span>
-          <strong>${escapeHtml(leadPattern)}</strong>
-          <p>${promptSeedCount} prompt seed${promptSeedCount === 1 ? "" : "s"} already written in the archive's own language.</p>
-        </article>
-      </div>
-    </section>
 
-    <section class="stack-grid">
-      <article class="surface-card">
+        <div class="hero-side-stack">
+          <article class="hero-glass-card hero-glass-card-spotlight">
+            <div class="hero-card-head">
+              <div>
+                <span class="eyebrow">Archive pulse</span>
+                <h2>Signal is condensing into a usable point of view.</h2>
+              </div>
+              <span class="hero-card-kicker">${referenceCount} local refs</span>
+            </div>
+
+            <div class="hero-metric-block">
+              <div>
+                <span class="hero-metric-value">${signalScore}%</span>
+                <span class="hero-metric-label">taste signal density</span>
+              </div>
+              <div class="hero-progress-stack">
+                <div class="hero-progress-row">
+                  <span>Signal read</span>
+                  <strong>${signalScore}%</strong>
+                </div>
+                <div class="hero-progress-track"><span style="width:${signalScore}%"></span></div>
+                <div class="hero-progress-row">
+                  <span>Prompt readiness</span>
+                  <strong>${promptScore}%</strong>
+                </div>
+                <div class="hero-progress-track hero-progress-track-mint"><span style="width:${promptScore}%"></span></div>
+              </div>
+            </div>
+
+            <div class="hero-mini-grid">
+              <div class="hero-mini-stat">
+                <strong>${captureCount}</strong>
+                <span>captures processed</span>
+              </div>
+              <div class="hero-mini-stat">
+                <strong>${snapshot.notableReferences.length}</strong>
+                <span>active anchors</span>
+              </div>
+              <div class="hero-mini-stat">
+                <strong>${questionCount}</strong>
+                <span>open tensions</span>
+              </div>
+            </div>
+
+            <div class="hero-tag-row">
+              <span class="hero-tag hero-tag-live">Local-first</span>
+              <span class="hero-tag">Vault-backed</span>
+              <span class="hero-tag">Voice-preserving</span>
+            </div>
+          </article>
+
+          <article class="hero-glass-card hero-marquee-card">
+            <div class="hero-card-head">
+              <div>
+                <span class="eyebrow">Archive atmosphere</span>
+                <h2>Everything shaping the current moodboard.</h2>
+              </div>
+            </div>
+            <div class="orbit-marquee">
+              <div class="orbit-marquee-track">
+                ${renderOrbitMarquee(marqueeItems)}
+              </div>
+            </div>
+            <div class="memory-board memory-board-compact">
+              <article class="memory-note memory-note-feature note-peach">
+                <span class="note-label">dominant theme</span>
+                <strong>${escapeHtml(leadTheme)}</strong>
+                <div class="memory-mini-pills">${renderMiniSignalPills(snapshot.themes.slice(0, 3))}</div>
+              </article>
+              <article class="memory-note note-blue">
+                <span class="note-label">top motif</span>
+                <strong>${escapeHtml(leadMotif)}</strong>
+                <div class="memory-mini-pills">${renderMiniSignalPills(snapshot.motifs.slice(0, 3))}</div>
+              </article>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="stack-grid home-grid-top">
+        <article class="surface-card surface-card-spotlight">
         <header class="surface-head">
           <div>
             <span class="eyebrow">Themes</span>
             <h2>Threads your archive keeps pulling</h2>
           </div>
         </header>
-        <div class="signal-cloud">${renderSignalChips(snapshot.themes)}</div>
+        <div class="signal-cloud">${renderFilterableSignalChips(snapshot.themes, "theme")}</div>
       </article>
 
-      <article class="surface-card">
+      <article class="surface-card surface-card-spotlight">
         <header class="surface-head">
           <div>
             <span class="eyebrow">Motifs</span>
             <h2>Craft moves you seem to trust instinctively</h2>
           </div>
         </header>
-        <div class="signal-cloud">${renderSignalChips(snapshot.motifs)}</div>
+        <div class="signal-cloud">${renderFilterableSignalChips(snapshot.motifs, "motif")}</div>
       </article>
-    </section>
+      </section>
 
-    <section class="stack-grid">
-      <article class="surface-card">
+      <section class="stack-grid home-grid-middle">
+        <article class="surface-card surface-card-story">
         <header class="surface-head">
           <div>
             <span class="eyebrow">Pattern read</span>
@@ -416,6 +511,7 @@ function renderHomeView(): void {
                     <article class="pattern-card">
                       <strong>${escapeHtml(pattern.label)}</strong>
                       <p>${escapeHtml(pattern.summary)}</p>
+                      ${renderSupportingReferencePills(pattern.sourceReferenceIds)}
                     </article>
                   `,
                 )
@@ -424,7 +520,7 @@ function renderHomeView(): void {
         </div>
       </article>
 
-      <article class="surface-card">
+      <article class="surface-card surface-card-story">
         <header class="surface-head">
           <div>
             <span class="eyebrow">Prompt seeds</span>
@@ -432,22 +528,24 @@ function renderHomeView(): void {
           </div>
         </header>
         <div class="prompt-list">
-          ${snapshot.promptSeeds
-            .map(
-              (seed, index) => `
-                <button class="prompt-card" type="button" data-seed-index="${index}">
-                  <strong>${escapeHtml(seed.title)}</strong>
-                  <p>${escapeHtml(seed.prompt)}</p>
-                </button>
-              `,
-            )
-            .join("")}
+          ${snapshot.promptSeeds.length > 0
+            ? snapshot.promptSeeds
+                .map(
+                  (seed, index) => `
+                    <button class="prompt-card" type="button" data-seed-index="${index}">
+                      <strong>${escapeHtml(seed.title)}</strong>
+                      <p>${escapeHtml(seed.prompt)}</p>
+                    </button>
+                  `,
+                )
+                .join("")
+            : `<p class="empty-copy">The archive needs a little more grounded signal before it can suggest useful prompts here.</p>`}
         </div>
       </article>
-    </section>
+      </section>
 
-    <section class="stack-grid">
-      <article class="surface-card">
+      <section class="stack-grid home-grid-middle">
+        <article class="surface-card surface-card-story">
         <header class="surface-head">
           <div>
             <span class="eyebrow">Tensions</span>
@@ -462,6 +560,7 @@ function renderHomeView(): void {
                     <article class="pattern-card">
                       <strong>${escapeHtml(tension.label)}</strong>
                       <p>${escapeHtml(tension.summary)}</p>
+                      ${renderSupportingReferencePills(tension.referenceIds)}
                     </article>
                   `,
                 )
@@ -470,7 +569,7 @@ function renderHomeView(): void {
         </div>
       </article>
 
-      <article class="surface-card">
+      <article class="surface-card surface-card-story">
         <header class="surface-head">
           <div>
             <span class="eyebrow">Boundary Surface</span>
@@ -492,58 +591,85 @@ function renderHomeView(): void {
             : `<p class="empty-copy">No anti-signals called out yet.</p>`}
         </div>
       </article>
-    </section>
+      </section>
 
-    <section class="surface-card">
-      <header class="surface-head">
-        <div>
-          <span class="eyebrow">Open Questions</span>
-          <h2>Uncertainty that should stay visible</h2>
-        </div>
-      </header>
-      <div class="prompt-list">
-        ${snapshot.openQuestions.length > 0
-          ? snapshot.openQuestions
-              .map(
-                (question) => `
-                  <article class="prompt-card prompt-card-question">
-                    <strong>Needs a sharper read</strong>
-                    <p>${escapeHtml(question)}</p>
-                  </article>
-                `,
-              )
-              .join("")
-          : `<p class="empty-copy">No open questions surfaced in the current snapshot.</p>`}
-      </div>
-    </section>
+      <section class="stack-grid home-grid-bottom">
+        <article class="surface-card surface-card-story">
+          <header class="surface-head">
+            <div>
+              <span class="eyebrow">References</span>
+              <h2>What is shaping the current moodboard</h2>
+            </div>
+            <button class="link-btn" id="home-references" type="button">Browse all references</button>
+          </header>
+          <div class="reference-strip reference-strip-wide">
+            ${snapshot.notableReferences.length > 0
+              ? snapshot.notableReferences.map((reference) => renderReferenceStripCard(reference)).join("")
+              : `<p class="empty-copy">No references yet. Capture your first link to start compiling the archive.</p>`}
+          </div>
+        </article>
 
-    <section class="surface-card">
-      <header class="surface-head">
-        <div>
-          <span class="eyebrow">References</span>
-          <h2>What is shaping the current moodboard</h2>
+        <article class="surface-card surface-card-story">
+          <header class="surface-head">
+            <div>
+              <span class="eyebrow">Open Questions</span>
+              <h2>Uncertainty that should stay visible</h2>
+            </div>
+          </header>
+          <div class="prompt-list">
+            ${snapshot.openQuestions.length > 0
+              ? snapshot.openQuestions
+                  .map(
+                    (question) => `
+                      <article class="prompt-card prompt-card-question">
+                        <strong>Needs a sharper read</strong>
+                        <p>${escapeHtml(question)}</p>
+                      </article>
+                    `,
+                  )
+                  .join("")
+              : `<p class="empty-copy">No open questions surfaced in the current snapshot.</p>`}
+          </div>
+        </article>
+      </section>
+
+      <section class="home-finale">
+        <div class="home-finale-marquee">
+          <div class="home-finale-marquee-track">${renderOrbitMarquee(marqueeItems)}</div>
         </div>
-        <button class="link-btn" id="home-references">Browse all references</button>
-      </header>
-      <div class="reference-strip">
-        ${snapshot.notableReferences.length > 0
-          ? snapshot.notableReferences.map((reference) => renderReferenceStripCard(reference)).join("")
-          : `<p class="empty-copy">No references yet. Capture your first link to start compiling the archive.</p>`}
-      </div>
+        <div class="home-finale-content">
+          <span class="eyebrow">Next move</span>
+          <h2>Keep the capture loop moving while the vault sharpens your voice.</h2>
+          <p>The archive is most useful when capture, recall, and idea-making feel like one continuous surface instead of three different chores.</p>
+          <div class="hero-actions">
+            <button class="pill-btn pill-btn-solid" type="button" data-home-action="capture">Open capture desk</button>
+            <button class="pill-btn" type="button" data-home-action="ideas">Open create ideas</button>
+            <button class="pill-btn pill-btn-muted" type="button" data-home-action="studio">Open wiki explorer</button>
+          </div>
+        </div>
+        <div class="home-finale-word" aria-hidden="true">AFTERTASTE</div>
+      </section>
     </section>
   `;
 
-  document.getElementById("home-capture")?.addEventListener("click", () => {
-    void navigate("capture");
-  });
-  document.getElementById("home-ideas")?.addEventListener("click", () => {
-    state.ideaForm.referenceIds = snapshot.notableReferences.slice(0, 3).map((reference) => reference.id);
-    state.ideaForm.brief = snapshot.promptSeeds[0]?.prompt ?? state.ideaForm.brief;
-    renderIdeasView();
-    void navigate("ideas");
-  });
-  document.getElementById("home-studio")?.addEventListener("click", () => {
-    void navigate("studio", { page: "wiki/snapshots/current.md" });
+  container.querySelectorAll<HTMLButtonElement>("[data-home-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const action = button.getAttribute("data-home-action");
+      if (action === "capture") {
+        void navigate("capture");
+        return;
+      }
+      if (action === "ideas") {
+        state.ideaForm.referenceIds = snapshot.notableReferences.slice(0, 3).map((reference) => reference.id);
+        state.ideaForm.brief = snapshot.promptSeeds[0]?.prompt ?? state.ideaForm.brief;
+        renderIdeasView();
+        void navigate("ideas");
+        return;
+      }
+      if (action === "studio") {
+        void navigate("studio", { page: "wiki/snapshots/current.md" });
+      }
+    });
   });
   document.getElementById("home-references")?.addEventListener("click", () => {
     void navigate("references");
@@ -559,6 +685,16 @@ function renderHomeView(): void {
       void navigate("ideas");
     });
   });
+  container.querySelectorAll<HTMLButtonElement>("[data-signal-filter-kind]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const kind = button.getAttribute("data-signal-filter-kind");
+      const value = button.getAttribute("data-signal-filter");
+      if (!kind || !value) return;
+      if (kind !== "theme" && kind !== "motif") return;
+      state.referenceFilters[kind] = value;
+      void refreshReferences().then(() => navigate("references"));
+    });
+  });
   container.querySelectorAll<HTMLButtonElement>("[data-open-reference]").forEach((button) => {
     button.addEventListener("click", () => {
       const id = button.getAttribute("data-open-reference");
@@ -568,6 +704,18 @@ function renderHomeView(): void {
       void navigate("references");
     });
   });
+}
+
+function renderOrbitMarquee(items: string[]): string {
+  const safeItems = items.filter((item) => item.trim().length > 0);
+  const repeated = [...safeItems, ...safeItems];
+  return repeated
+    .map(
+      (item) => `
+        <span class="orbit-marquee-item">${escapeHtml(item)}</span>
+      `,
+    )
+    .join("");
 }
 
 function renderCaptureView(): void {
@@ -690,9 +838,31 @@ function renderCaptureView(): void {
         <div class="signal-cloud">${renderSignalChips(result.analysis?.themes ?? [])}</div>
         <div class="signal-cloud signal-cloud-tight">
           <span class="signal-chip">${escapeHtml(result.capture.sourceKind)}</span>
+          <span class="signal-chip">${escapeHtml(result.capture.acquisitionCoverage ?? "url-only")}</span>
           ${result.capture.collection ? `<span class="signal-chip">${escapeHtml(result.capture.collection)}</span>` : ""}
           ${result.capture.projectIds.map((projectId) => `<span class="signal-chip">${escapeHtml(projectId)}</span>`).join("")}
         </div>
+        ${
+          (result.capture.acquisitionAttempts?.length ?? 0) > 0
+            ? `
+              <div class="detail-block">
+                <span class="detail-label">Acquisition ladder</span>
+                <ul class="detail-list">
+                  ${result.capture.acquisitionAttempts
+                    ?.map(
+                      (attempt) => `
+                        <li>
+                          <strong>${escapeHtml(attempt.target)}</strong>
+                          ${escapeHtml(`${attempt.mode} · ${attempt.status} · ${attempt.provider}`)}
+                        </li>
+                      `,
+                    )
+                    .join("")}
+                </ul>
+              </div>
+            `
+            : ""
+        }
         ${
           (result.analysis?.moments.length ?? 0) > 0
             ? `
@@ -706,7 +876,7 @@ function renderCaptureView(): void {
         <div class="hero-actions">
           <button class="pill-btn pill-btn-solid" id="capture-view-home">See snapshot</button>
           <button class="pill-btn" id="capture-open-ideas">Use this in ideas</button>
-          <button class="pill-btn pill-btn-muted" id="capture-open-studio">Open Studio page</button>
+          <button class="pill-btn pill-btn-muted" id="capture-open-studio">Open Wiki Page</button>
         </div>
       </section>
     `
@@ -968,7 +1138,7 @@ function renderIdeasView(): void {
       <aside class="surface-card surface-card-accent ideas-builder">
         <header class="surface-head">
           <div>
-            <span class="eyebrow">Idea Studio</span>
+            <span class="eyebrow">Create Ideas</span>
             <h1>Turn this week's taste into something quietly precise.</h1>
           </div>
         </header>
@@ -1426,6 +1596,7 @@ function renderCaptureHistory(capture: CaptureRecord): string {
         <p>${escapeHtml(capture.sourceKind)}${capture.collection ? ` · ${escapeHtml(capture.collection)}` : ""}</p>
       </div>
       <div class="history-card-actions">
+        <span class="history-mode">${escapeHtml(capture.acquisitionCoverage ?? "url-only")}</span>
         <span class="history-mode">${escapeHtml(capture.ingestionMode)}</span>
         <button class="history-delete-btn" type="button" data-capture-id="${escapeHtml(capture.id)}" title="Delete capture">×</button>
       </div>
@@ -1500,7 +1671,7 @@ function renderContextStrip(title: string, excerpt: string, kind: "constitution"
       <span class="eyebrow">${escapeHtml(title)}</span>
       <p>${escapeHtml(safeExcerpt)}</p>
       <div class="detail-inline-actions">
-        <button class="link-btn" type="button" data-query-open-page="${escapeAttribute(pagePath)}">Open in Studio</button>
+        <button class="link-btn" type="button" data-query-open-page="${escapeAttribute(pagePath)}">Open in Wiki</button>
       </div>
     </article>
   `;
@@ -1542,6 +1713,9 @@ function renderIdeaSessionSummary(): string {
 }
 
 function renderMemoryQueryCard(entry: QueryIndexEntry): string {
+  if (entry.kind === "moment") {
+    return renderMomentQueryCard(entry);
+  }
   const canOpenStudio = entry.path.endsWith(".md");
   const sourceCount = entry.sourceIds.length;
   return `
@@ -1558,10 +1732,56 @@ function renderMemoryQueryCard(entry: QueryIndexEntry): string {
           ? `<button class="pill-btn pill-btn-solid" type="button" data-query-source-ids="${escapeAttribute(entry.sourceIds.join(","))}" data-query-summary="${escapeAttribute(entry.summary)}">Use sources in ideas</button>`
           : ""}
         ${canOpenStudio
-          ? `<button class="pill-btn" type="button" data-query-open-page="${escapeAttribute(entry.path)}">Open in Studio</button>`
+          ? `<button class="pill-btn" type="button" data-query-open-page="${escapeAttribute(entry.path)}">Open in Wiki</button>`
           : ""}
       </div>
     </article>
+  `;
+}
+
+function renderMomentQueryCard(entry: QueryIndexEntry): string {
+  const referenceId = entry.sourceIds[0] ?? "";
+  const startLabel = entry.momentStartMs != null ? formatMs(entry.momentStartMs) : null;
+  const endLabel = entry.momentEndMs != null ? formatMs(entry.momentEndMs) : null;
+  const timeRange = startLabel ? (endLabel ? `${startLabel}–${endLabel}` : startLabel) : null;
+  const signalSlugs = entry.tags.filter((t) => t.startsWith("signal:")).map((t) => t.slice(7));
+  return `
+    <article class="prompt-card memory-query-card memory-query-card-moment">
+      <span class="reference-platform">moment · ${escapeHtml(entry.momentKind ?? "beat")}</span>
+      <strong>${escapeHtml(entry.title)}</strong>
+      ${timeRange ? `<span class="moment-timestamp">${escapeHtml(timeRange)}</span>` : ""}
+      <p>${escapeHtml(entry.summary)}</p>
+      ${signalSlugs.length > 0 ? `
+        <div class="signal-row">
+          ${signalSlugs.map((slug) => `<span class="signal-chip">${escapeHtml(slug)}</span>`).join("")}
+        </div>
+      ` : ""}
+      <div class="detail-inline-actions">
+        ${referenceId ? `<button class="pill-btn" type="button" data-open-reference="${escapeAttribute(referenceId)}">Open reference</button>` : ""}
+        ${referenceId ? `<button class="pill-btn pill-btn-solid" type="button" data-query-source-ids="${escapeAttribute(referenceId)}" data-query-summary="${escapeAttribute(entry.summary)}">Use in ideas</button>` : ""}
+      </div>
+    </article>
+  `;
+}
+
+function renderSupportingReferencePills(referenceIds: string[]): string {
+  const references = referenceIds
+    .map((id) => state.catalog.references.find((candidate) => candidate.id === id))
+    .filter((reference): reference is ReferenceSummary => reference != null)
+    .slice(0, 3);
+  if (references.length === 0) return "";
+  return `
+    <div class="detail-inline-actions">
+      ${references
+        .map(
+          (reference) => `
+            <button class="reference-inline-pill" type="button" data-open-reference="${reference.id}">
+              ${escapeHtml(reference.title)}
+            </button>
+          `,
+        )
+        .join("")}
+    </div>
   `;
 }
 
@@ -1577,7 +1797,7 @@ function renderReferenceDetail(reference: ReferenceSummary): string {
       </div>
       <div class="hero-actions">
         <button class="pill-btn pill-btn-solid" type="button" id="reference-use-idea">Use in ideas</button>
-        <button class="pill-btn" type="button" id="reference-open-studio">Open Studio</button>
+        <button class="pill-btn" type="button" id="reference-open-studio">Browse Wiki</button>
       </div>
     </header>
     <p class="lede">${escapeHtml(reference.summary)}</p>
@@ -1593,39 +1813,39 @@ function renderReferenceDetail(reference: ReferenceSummary): string {
     </div>
     <div class="detail-block">
       <span class="detail-label">Themes</span>
-      <div class="signal-cloud">${renderSignalChips(reference.themes)}</div>
+      ${renderSignalEvidenceList(reference.themes)}
     </div>
     <div class="detail-block">
       <span class="detail-label">Motifs</span>
-      <div class="signal-cloud">${renderSignalChips(reference.motifs)}</div>
+      ${renderSignalEvidenceList(reference.motifs)}
     </div>
     <div class="detail-block">
       <span class="detail-label">Formats</span>
-      <div class="signal-cloud">${renderSignalChips(reference.formatSignals)}</div>
+      ${renderSignalEvidenceList(reference.formatSignals)}
     </div>
     <div class="detail-block">
       <span class="detail-label">Creators</span>
-      <div class="signal-cloud">${renderSignalChips(reference.creatorSignals)}</div>
+      ${renderSignalEvidenceList(reference.creatorSignals)}
     </div>
     <div class="detail-block">
       <span class="detail-label">Tone</span>
-      <div class="signal-cloud">${renderSignalChips(reference.toneSignals)}</div>
+      ${renderSignalEvidenceList(reference.toneSignals)}
     </div>
     <div class="detail-block">
       <span class="detail-label">Visual cues</span>
-      <div class="signal-cloud">${renderSignalChips(reference.visualSignals)}</div>
+      ${renderSignalEvidenceList(reference.visualSignals)}
     </div>
     <div class="detail-block">
       <span class="detail-label">Audio cues</span>
-      <div class="signal-cloud">${renderSignalChips(reference.audioSignals)}</div>
+      ${renderSignalEvidenceList(reference.audioSignals)}
     </div>
     <div class="detail-block">
       <span class="detail-label">Pacing</span>
-      <div class="signal-cloud">${renderSignalChips(reference.pacingSignals)}</div>
+      ${renderSignalEvidenceList(reference.pacingSignals)}
     </div>
     <div class="detail-block">
       <span class="detail-label">Story moves</span>
-      <div class="signal-cloud">${renderSignalChips(reference.storySignals)}</div>
+      ${renderSignalEvidenceList(reference.storySignals)}
     </div>
     <div class="detail-block">
       <span class="detail-label">Moments</span>
@@ -1747,13 +1967,33 @@ function renderCitationPills(citations: string[]): string {
     ...state.catalog.references,
   ];
   const byId = new Map(contextReferences.map((reference) => [reference.id, reference] as const));
+
+  // Build a flat lookup of grounded moments from momentExcerpts
+  const momentById = new Map<string, ReferenceMoment>();
+  for (const moments of Object.values(state.ideas?.context.momentExcerpts ?? {})) {
+    for (const moment of moments) {
+      if (moment.id) momentById.set(moment.id, moment);
+    }
+  }
+
   return `
     <div class="citation-row">
       ${citations
         .map((citation) => {
+          const moment = momentById.get(citation);
+          if (moment) {
+            // Moment citation: extract parent reference ID (format: captureId:type:index)
+            const referenceId = citation.split(":")[0] ?? citation;
+            const timestamp = moment.startMs != null ? formatMs(moment.startMs) : null;
+            return `
+              <button class="citation-pill citation-pill-moment" type="button" data-open-reference="${escapeAttribute(referenceId)}">
+                ${escapeHtml(moment.label)}${timestamp ? ` · ${escapeHtml(timestamp)}` : ""}
+              </button>
+            `;
+          }
           const reference = byId.get(citation);
           return `
-            <button class="citation-pill" type="button" data-open-reference="${citation}">
+            <button class="citation-pill" type="button" data-open-reference="${escapeAttribute(citation)}">
               ${escapeHtml(reference?.title ?? citation)}
             </button>
           `;
@@ -1770,12 +2010,69 @@ function renderSignalChips(signals: SignalTag[]): string {
   return signals
     .map(
       (signal) => `
-        <span class="signal-chip">
+        <span class="signal-chip" title="${escapeAttribute(buildSignalTooltip(signal))}">
           <strong>${escapeHtml(signal.label)}</strong>
         </span>
       `,
     )
     .join("");
+}
+
+function renderFilterableSignalChips(
+  signals: SignalTag[],
+  kind: "theme" | "motif",
+): string {
+  if (signals.length === 0) {
+    return `<span class="signal-chip signal-chip-empty">Still collecting signal</span>`;
+  }
+  return signals
+    .map(
+      (signal) => `
+        <button
+          class="signal-chip signal-chip-button"
+          type="button"
+          data-signal-filter-kind="${kind}"
+          data-signal-filter="${escapeAttribute(signal.slug)}"
+          title="${escapeAttribute(buildSignalTooltip(signal))}"
+        >
+          <strong>${escapeHtml(signal.label)}</strong>
+        </button>
+      `,
+    )
+    .join("");
+}
+
+function renderSignalEvidenceList(signals: SignalTag[]): string {
+  if (signals.length === 0) {
+    return `<p class="empty-copy">Still collecting signal</p>`;
+  }
+  return `
+    <ul class="detail-list compact-list signal-evidence-list">
+      ${signals
+        .map(
+          (signal) => `
+            <li>
+              <strong>${escapeHtml(signal.label)}:</strong>
+              ${escapeHtml(formatSignalEvidence(signal.evidence))}
+            </li>
+          `,
+        )
+        .join("")}
+    </ul>
+  `;
+}
+
+function formatSignalEvidence(evidence: string[]): string {
+  if (evidence.length === 0) return "Grounded in the captured source.";
+  return evidence
+    .slice(0, 2)
+    .map((item) => `"${truncateText(item.trim(), 96)}"`)
+    .join(" · ");
+}
+
+function buildSignalTooltip(signal: SignalTag): string {
+  const evidence = formatSignalEvidence(signal.evidence);
+  return evidence ? `${signal.label}: ${evidence}` : signal.label;
 }
 
 function renderMiniSignalPills(signals: SignalTag[]): string {
@@ -1832,6 +2129,29 @@ function readFileAsDataUrl(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error("failed to read file"));
     reader.readAsDataURL(file);
   });
+}
+
+function bindPointerLighting(): void {
+  const root = document.documentElement;
+  const update = (x: number, y: number) => {
+    root.style.setProperty("--pointer-x", `${x}px`);
+    root.style.setProperty("--pointer-y", `${y}px`);
+  };
+  update(window.innerWidth * 0.7, Math.min(window.innerHeight * 0.25, 220));
+  window.addEventListener(
+    "pointermove",
+    (event) => {
+      update(event.clientX, event.clientY);
+    },
+    { passive: true },
+  );
+}
+
+function formatMs(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
 function formatDate(value: string): string {
