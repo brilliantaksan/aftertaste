@@ -9,6 +9,7 @@ import {
   generateIdeas,
   getCaptureDetail,
   getCurrentSnapshot,
+  getCurrentSnapshotSmart,
   getProjectBrief,
   getRelatedReferences,
   getWikiArticleDetail,
@@ -19,6 +20,7 @@ import {
   planWikiCleanup,
   runAnalysis,
   searchQueryIndex,
+  searchQueryIndexSmart,
 } from "../aftertaste/service.js";
 import { createRenderer } from "../render/markdown.js";
 import type {
@@ -135,6 +137,8 @@ export function handleCaptureAnalyze(cfg: ServerConfig) {
       const analysis = await runAnalysis(cfg.wikiRoot, id);
       const detail = getCaptureDetail(cfg.wikiRoot, id);
       res.json({ ...detail, analysis });
+      // Compile runs after response so it doesn't block the analyze round-trip.
+      setImmediate(() => { compileAftertaste(cfg.wikiRoot); });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       res.status(message.includes("not found") ? 404 : 500).json({ error: message });
@@ -210,9 +214,9 @@ export function handleWikiCleanupApply(cfg: ServerConfig) {
 }
 
 export function handleSnapshotCurrent(cfg: ServerConfig) {
-  return (_req: Request, res: Response) => {
+  return async (_req: Request, res: Response) => {
     try {
-      res.json(getCurrentSnapshot(cfg.wikiRoot));
+      res.json(await getCurrentSnapshotSmart(cfg.wikiRoot));
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
     }
@@ -255,10 +259,10 @@ export function handleRelatedReferences(cfg: ServerConfig) {
 }
 
 export function handleQueryIndex(cfg: ServerConfig) {
-  return (req: Request, res: Response) => {
+  return async (req: Request, res: Response) => {
     try {
       res.json(
-        searchQueryIndex(cfg.wikiRoot, {
+        await searchQueryIndexSmart(cfg.wikiRoot, {
           q: normalizeQuery(req.query.q),
           theme: normalizeQuery(req.query.theme),
           motif: normalizeQuery(req.query.motif),
@@ -403,5 +407,13 @@ function isSourceKind(value: unknown): value is SourceKind {
 }
 
 function isQueryKind(value: unknown): value is QueryIndexEntry["kind"] {
-  return value === "reference" || value === "catalyst" || value === "wiki-article" || value === "snapshot" || value === "constitution" || value === "not-me" || value === "brief" || value === "creative-session";
+  return value === "reference"
+    || value === "catalyst"
+    || value === "wiki-article"
+    || value === "snapshot"
+    || value === "constitution"
+    || value === "not-me"
+    || value === "brief"
+    || value === "creative-session"
+    || value === "moment";
 }
