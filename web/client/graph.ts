@@ -2,28 +2,24 @@ import * as d3force from "d3-force";
 import * as d3sel from "d3-selection";
 import * as d3zoom from "d3-zoom";
 import * as d3drag from "d3-drag";
+import type { TasteGraph, TasteGraphEdge as TasteGraphEdgeData, TasteGraphNode } from "../shared/contracts.js";
 
-export interface GraphNode extends d3force.SimulationNodeDatum {
-  id: string;
-  label: string;
-  path: string;
-  group: string;
-  degree: number;
-  title: string | null;
-}
+export interface GraphNode extends TasteGraphNode, d3force.SimulationNodeDatum {}
 
-export interface GraphEdge extends d3force.SimulationLinkDatum<GraphNode> {
+interface GraphEdge extends TasteGraphEdgeData, d3force.SimulationLinkDatum<GraphNode> {
   source: string | GraphNode;
   target: string | GraphNode;
 }
 
-export interface GraphData {
-  nodes: GraphNode[];
-  edges: GraphEdge[];
-}
-
 export interface GraphOptions {
   onNodeClick?: (node: GraphNode) => void;
+}
+
+export interface GraphHandle {
+  teardown: () => void;
+  zoomIn: () => void;
+  zoomOut: () => void;
+  zoomReset: () => void;
 }
 
 /**
@@ -45,9 +41,9 @@ export interface GraphOptions {
  */
 export function renderGraph(
   svgEl: SVGSVGElement,
-  data: GraphData,
+  data: TasteGraph,
   opts: GraphOptions = {},
-): () => void {
+): GraphHandle {
   const svg = d3sel.select(svgEl);
   svg.selectAll("*").remove();
 
@@ -90,7 +86,7 @@ export function renderGraph(
 
   // ── Data prep ───────────────────────────────────────────────────────────
   const nodes: GraphNode[] = data.nodes.map((n) => ({ ...n }));
-  const links: GraphEdge[] = data.edges.map((e) => ({ ...e }));
+  const links: GraphEdge[] = data.edges.map((e) => ({ ...e, source: e.sourceId, target: e.targetId }));
 
   // Seed initial positions in a tight ring so the entry animation spreads
   // outward naturally instead of popping in.
@@ -104,8 +100,8 @@ export function renderGraph(
   const adjacency = new Map<string, Set<string>>();
   for (const n of nodes) adjacency.set(n.id, new Set());
   for (const e of data.edges) {
-    const s = typeof e.source === "string" ? e.source : e.source.id;
-    const t = typeof e.target === "string" ? e.target : e.target.id;
+    const s = e.sourceId;
+    const t = e.targetId;
     adjacency.get(s)?.add(t);
     adjacency.get(t)?.add(s);
   }
@@ -157,7 +153,10 @@ export function renderGraph(
     .append("path")
     .attr("class", "link")
     .attr("fill", "none")
-    .attr("stroke-linecap", "round");
+    .attr("stroke-linecap", "round")
+    .attr("data-kind", (d) => d.kind)
+    .attr("stroke-width", (d) => 1 + d.weight * 1.8)
+    .attr("opacity", (d) => 0.18 + d.weight * 0.32);
 
   // ── Nodes: outer g gets d3 translate, inner g gets CSS entry animation ─
   const nodeSel = nodeLayer
@@ -264,9 +263,20 @@ export function renderGraph(
     nodeSel.attr("transform", (d) => `translate(${d.x},${d.y})`);
   });
 
-  return () => {
-    sim.stop();
-    svg.selectAll("*").remove();
+  return {
+    teardown: () => {
+      sim.stop();
+      svg.selectAll("*").remove();
+    },
+    zoomIn: () => {
+      zoomBehavior.scaleBy(svg, 1.4);
+    },
+    zoomOut: () => {
+      zoomBehavior.scaleBy(svg, 0.72);
+    },
+    zoomReset: () => {
+      zoomBehavior.transform(svg, d3zoom.zoomIdentity);
+    },
   };
 }
 
@@ -277,7 +287,9 @@ function sanitizeGroup(g: string): string {
     g === "motifs" ||
     g === "creators" ||
     g === "formats" ||
-    g === "snapshots"
+    g === "snapshots" ||
+    g === "briefs" ||
+    g === "sessions"
   ) {
     return g;
   }

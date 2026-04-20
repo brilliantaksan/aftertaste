@@ -1,14 +1,14 @@
 {
   "name": "llm-wiki-web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Local wiki preview + audit feedback server for the llm-wiki skill.",
   "scripts": {
     "build": "node build-client.mjs",
     "prestart": "npm run build",
-    "start": "tsx server/index.ts",
-    "dev": "tsx watch server/index.ts",
+    "start": "tsx --env-file-if-exists ../.env server/index.ts",
+    "dev": "tsx watch --env-file-if-exists ../.env server/index.ts",
     "test": "tsx --test server/**/*.test.ts"
   },
   "dependencies": {

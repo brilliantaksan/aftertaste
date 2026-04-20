@@ -29,15 +29,55 @@ function renderNode(
   if (node.kind === "dir") {
     if (!isRoot) {
       const li = document.createElement("li");
-      li.className = "tree-dir";
-      li.textContent = node.name;
+
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "tree-dir is-open";
+      btn.textContent = node.name;
+      li.appendChild(btn);
+
+      const childWrapper = document.createElement("div");
+      childWrapper.className = "tree-children";
+
+      const ul = document.createElement("ul");
+      for (const child of node.children ?? []) {
+        renderNode(ul, child, onSelect, false);
+      }
+      childWrapper.appendChild(ul);
+      li.appendChild(childWrapper);
+
+      // Set initial max-height after layout so transition has a start value
+      requestAnimationFrame(() => {
+        childWrapper.style.maxHeight = `${childWrapper.scrollHeight}px`;
+      });
+
+      btn.addEventListener("click", () => {
+        const isOpen = btn.classList.contains("is-open");
+        if (isOpen) {
+          // Animate closed: lock to current height first, then collapse
+          childWrapper.style.maxHeight = `${childWrapper.scrollHeight}px`;
+          requestAnimationFrame(() => {
+            childWrapper.style.maxHeight = "0";
+          });
+          btn.classList.remove("is-open");
+          childWrapper.classList.add("is-collapsed");
+        } else {
+          // Animate open
+          childWrapper.classList.remove("is-collapsed");
+          childWrapper.style.maxHeight = `${childWrapper.scrollHeight}px`;
+          btn.classList.add("is-open");
+        }
+      });
+
       parent.appendChild(li);
+    } else {
+      // Root dir: render children directly without wrapping li
+      const ul = document.createElement("ul");
+      for (const child of node.children ?? []) {
+        renderNode(ul, child, onSelect, false);
+      }
+      parent.appendChild(ul);
     }
-    const ul = document.createElement("ul");
-    for (const child of node.children ?? []) {
-      renderNode(ul, child, onSelect, false);
-    }
-    parent.appendChild(ul);
   } else {
     const li = document.createElement("li");
     const a = document.createElement("a");
