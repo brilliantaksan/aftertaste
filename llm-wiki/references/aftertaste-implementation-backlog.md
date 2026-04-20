@@ -1097,21 +1097,307 @@ interface ReelAcquirer {
 
 - [x] AT-117 Formalize Instagram Reel Ingestion And Acquisition Provenance
 
+## Research Update: What Actually Comes Next
+
+The multimodal research changes the backlog in one important way:
+
+- the next phase is **not** "fetch more transcript text"
+- the next phase is **artifact quality and grounding**
+- the repo already has the transcript-first spine
+- what it lacks is:
+  - explicit acquisition-policy handling
+  - versioned provider receipts
+  - stronger timestamped segment normalization
+  - a real provider-backed media-analysis adapter
+  - retrieval over grounded multimodal moments instead of only page-level summaries
+
+In other words, the right next branch is:
+
+1. make acquisition and provider outputs inspectable
+2. normalize moments/timestamps into reusable artifacts
+3. add one serious media provider behind the current adapter seam
+4. compile/query those grounded moments without breaking the local-first vault model
+
+## New Post-V1 Tickets
+
+### AT-119: Version Artifact Generations And Provider Receipts
+
+**Priority**
+
+- P1
+
+**Goal**
+
+- make `transcript.json` and `media-analysis.json` durable across provider changes instead of silently overwriting one opaque latest result
+
+**Why now**
+
+- the current artifact paths are correct, but the research makes the operational risk clear:
+  provider/model behavior changes over time, and Aftertaste needs inspectable receipts for re-compile, audit, and provider swaps
+
+**Files**
+
+- [web/shared/contracts.ts](../../web/shared/contracts.ts)
+- [web/server/aftertaste/service.ts](../../web/server/aftertaste/service.ts)
+- [web/server/aftertaste/media-analysis.ts](../../web/server/aftertaste/media-analysis.ts)
+- [web/server/aftertaste/service.test.ts](../../web/server/aftertaste/service.test.ts)
+
+**Implementation**
+
+- add versioning metadata to transcript and media artifacts:
+  - provider id
+  - provider model
+  - artifact schema version
+  - input fingerprint / source hash placeholder
+  - generatedAt
+- stop treating the artifact file as "just the current value"
+- either:
+  - keep `transcript.json` and `media-analysis.json` as the latest pointer plus a `history/` directory
+  - or add a `generationId` + append-only generation log in the same capture folder
+- record enough receipt data to answer:
+  - what bytes/text were analyzed
+  - which provider/model produced this output
+  - whether a later re-run superseded it
+
+**Acceptance criteria**
+
+- provider/model changes do not destroy prior artifact provenance
+- artifact generations are comparable in tests
+- compile can still read a stable "current artifact" path without learning provider-specific logic
+
+### AT-120: Add An Explicit Acquisition Adapter Ladder
+
+**Priority**
+
+- P1
+
+**Goal**
+
+- turn media acquisition into a first-class adapter seam instead of scattered per-platform conditionals
+
+**Why now**
+
+- the research reinforces that the main multimodal bottleneck is lawful, reliable acquisition, not downstream summarization
+
+**Files**
+
+- [web/shared/contracts.ts](../../web/shared/contracts.ts)
+- [web/server/aftertaste/service.ts](../../web/server/aftertaste/service.ts)
+- [web/server/routes/aftertaste.ts](../../web/server/routes/aftertaste.ts)
+- [web/server/aftertaste/service.test.ts](../../web/server/aftertaste/service.test.ts)
+
+**Implementation**
+
+- formalize acquisition attempts as ordered adapters:
+  - source-link only
+  - official-api
+  - user-upload
+  - manual transcript / pasted text
+  - best-effort extractor
+- persist an acquisition attempt log per capture, not just the latest status summary
+- make "user-provided artifacts" a first-class path, especially for Reels/TikToks
+- keep all unofficial extraction explicitly optional and non-blocking
+- expose enough state for the UI to show:
+  - what the app actually acquired
+  - what remains missing
+  - whether deeper analysis is eligible yet
+
+**Acceptance criteria**
+
+- capture detail can distinguish URL-only, metadata-only, transcript-backed, and byte-backed states
+- failed best-effort extraction never blocks capture or compile
+- a later manual upload can upgrade the same capture into a higher-trust acquisition state
+
+### AT-121: Normalize Timestamped Segments Into Reusable Moment Artifacts
+
+**Priority**
+
+- P1
+
+**Goal**
+
+- promote transcript segments and media moments into a shared, queryable timeline shape
+
+**Why now**
+
+- the current contracts already have `segments` and `moments`, but they are still provider-specific and too shallow for grounded retrieval
+
+**Files**
+
+- [web/shared/contracts.ts](../../web/shared/contracts.ts)
+- [web/server/aftertaste/service.ts](../../web/server/aftertaste/service.ts)
+- [web/server/aftertaste/media-analysis.ts](../../web/server/aftertaste/media-analysis.ts)
+- [web/server/aftertaste/service.test.ts](../../web/server/aftertaste/service.test.ts)
+
+**Implementation**
+
+- define a normalized moment/timeline contract that can absorb:
+  - transcript segments
+  - speaker turns
+  - chapter-like sections
+  - visual beats
+  - audio events
+- preserve provider-specific raw detail, but compile into one stable shape for Aftertaste:
+  - `id`
+  - `captureId`
+  - `kind`
+  - `label`
+  - `summary`
+  - `startMs`
+  - `endMs`
+  - `speaker?`
+  - `signalTags`
+  - `evidence`
+- derive `ReferenceSummary.moments` from this normalized layer rather than directly from ad hoc analysis helpers
+- keep it file-backed under `raw/media/<captureId>/`
+
+**Acceptance criteria**
+
+- one capture can expose multiple grounded moments with timestamps
+- transcript-backed and media-backed moments share a common shape
+- later providers can add detail without changing downstream compile behavior
+
+### AT-122: Add A Real Speech Adapter Interface Beyond The OpenAI Happy Path
+
+**Priority**
+
+- P2
+
+**Goal**
+
+- keep the current OpenAI path, but stop making it the only route to stronger timing and speaker structure
+
+**Why now**
+
+- the research points to a clean fork:
+  local-first STT for privacy/cost control or managed STT for faster iteration
+- Aftertaste needs the seam before it picks the next provider
+
+**Files**
+
+- [web/server/aftertaste/llm.ts](../../web/server/aftertaste/llm.ts)
+- [web/server/aftertaste/service.ts](../../web/server/aftertaste/service.ts)
+- [web/shared/contracts.ts](../../web/shared/contracts.ts)
+- [web/server/aftertaste/service.test.ts](../../web/server/aftertaste/service.test.ts)
+
+**Implementation**
+
+- extract audio transcription behind a provider interface
+- keep the current OpenAI transcription adapter
+- add room for:
+  - local Whisper / WhisperX worker
+  - AssemblyAI or equivalent managed STT
+- map all providers into the same transcript artifact contract
+- preserve graceful fallback when no provider is configured
+
+**Acceptance criteria**
+
+- transcription provider choice does not leak into compile or idea generation
+- stronger providers can add word timings / speaker labels without reshaping the vault
+- missing provider config still falls back cleanly
+
+### AT-123: Ship The First Provider-Backed Media Analysis Adapter
+
+**Priority**
+
+- P2
+
+**Goal**
+
+- replace heuristic-only media understanding with one real adapter for captures that actually have video bytes
+
+**Why now**
+
+- the current `media-analysis.ts` seam is correct, but still intentionally shallow
+- the research strongly supports a provider-backed path only after byte acquisition is real and inspectable
+
+**Files**
+
+- [web/server/aftertaste/media-analysis.ts](../../web/server/aftertaste/media-analysis.ts)
+- [web/server/aftertaste/service.ts](../../web/server/aftertaste/service.ts)
+- [web/shared/contracts.ts](../../web/shared/contracts.ts)
+- [web/server/aftertaste/service.test.ts](../../web/server/aftertaste/service.test.ts)
+
+**Implementation**
+
+- add one production adapter behind the existing seam:
+  - preferred library-scale path: `twelve-labs`
+  - acceptable prompt-shaped path: `gemini`
+- only run this adapter when durable media bytes exist
+- persist:
+  - provider id
+  - model/version
+  - returned moments
+  - returned visual/audio/story signals
+  - provider receipt ids needed for later refresh/reindex
+- keep the current heuristic adapter as fallback
+- do not imply frame-level understanding when the provider path did not run
+
+**Acceptance criteria**
+
+- byte-backed video captures can produce non-heuristic `media-analysis.json`
+- output includes timestamped moments and provider provenance
+- captures without media bytes still stay on the current shallow fallback path
+
+### AT-124: Compile And Query Grounded Multimodal Moments
+
+**Priority**
+
+- P2
+
+**Goal**
+
+- let retrieval operate on grounded moments, not only whole-reference summaries
+
+**Why now**
+
+- the research makes the next value step obvious:
+  creators want "the clip where this feeling or pacing move happens," not just "references vaguely like this one"
+
+**Files**
+
+- [web/shared/contracts.ts](../../web/shared/contracts.ts)
+- [web/server/aftertaste/service.ts](../../web/server/aftertaste/service.ts)
+- [web/server/routes/aftertaste.ts](../../web/server/routes/aftertaste.ts)
+- [web/client/main.ts](../../web/client/main.ts)
+- [web/client/studio.ts](../../web/client/studio.ts)
+- [web/server/aftertaste/service.test.ts](../../web/server/aftertaste/service.test.ts)
+
+**Implementation**
+
+- compile grounded moments into:
+  - query-index entries
+  - taste-graph nodes or evidence
+  - related-reference explanations
+- add query support for:
+  - visual signal
+  - audio signal
+  - story beat
+  - time-bounded moment labels
+- surface top moments in Reference Explorer and Idea Studio citations
+- keep markdown canonical; do not invent a second hidden database as source of truth
+
+**Acceptance criteria**
+
+- a query can return relevant moments, not only references
+- citations in idea generation can point to grounded moments when available
+- graph and retrieval outputs remain fully derivable from vault artifacts
+
 ## Best First Move
 
 If only one concrete branch should start now, it should be:
 
-1. AT-111
-2. AT-112
-3. AT-114
-4. AT-115
+1. AT-119
+2. AT-120
+3. AT-121
+4. AT-123
 
-That sequence creates the smallest durable transcript-first base for everything else:
+That sequence creates the smallest durable multimodal base for everything else:
 
-- it makes extraction artifacts real before downstream analysis depends on them,
-- it keeps capture fast and local-first by pushing enrichment to analyze time,
-- it lets transcript-backed analysis and idea generation share the same file-backed source,
-- and it avoids pretending v1 has deep media understanding before the adapter seam exists.
+- it keeps the local-first artifact model intact,
+- it avoids over-investing in provider output before acquisition state is trustworthy,
+- it gives later STT and video providers a stable target shape,
+- and it upgrades retrieval with grounded evidence instead of generic multimodal claims.
 
 ## Not In Scope
 
@@ -1126,14 +1412,14 @@ That sequence creates the smallest durable transcript-first base for everything 
 
 ## Implementation Note
 
-Do not treat deep multimodal analysis as part of the first transcript branch.
+Do not treat "multimodal" as "turn on more model calls."
 
 The correct order is:
 
-- add file-backed transcript artifacts first,
-- then fetch source transcripts where available,
-- then add uploaded audio transcription behind the same artifact shape,
-- then make analysis and idea generation consume artifact-backed transcript text,
-- then add richer multimodal providers later if the transcript-first path proves valuable.
+- formalize acquisition policy first,
+- then version provider-backed artifacts,
+- then normalize moments/timelines,
+- then add one serious speech or video provider behind the existing seams,
+- then compile/query grounded moments.
 
-Otherwise Aftertaste will claim richer understanding while still running on metadata and heuristics.
+Otherwise Aftertaste will claim richer understanding while still running on weak acquisition and non-comparable artifacts.
