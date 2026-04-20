@@ -5,15 +5,21 @@ import yaml from "js-yaml";
 import { findPage } from "../render/markdown.js";
 import type {
   AnalysisResult,
+  ArtifactGenerationMetadata,
+  ArtifactProviderReceipt,
   BriefCreateRequest,
   BriefListResponse,
   CatalystRecord,
   CaptureAcquisitionRecord,
+  CaptureAcquisitionAttemptRecord,
+  CaptureAcquisitionCoverage,
   CaptureAsset,
   CaptureAssetInput,
   CaptureCreateRequest,
   CaptureDetailResponse,
   CaptureListResponse,
+  CaptureMomentRecord,
+  CaptureMomentsArtifact,
   CaptureRecord,
   CreativeSessionRecord,
   IdeaDraft,
@@ -49,7 +55,15 @@ import type {
   WikiLintIssueKind,
   WikiLintReport,
 } from "../../shared/contracts.js";
-import { generateConceptArticle, generateIdeaPlan, transcribeAudioFile } from "./llm.js";
+import {
+  analyzeCaptureSignals,
+  generateConceptArticle,
+  generateIdeaPlan,
+  getConfiguredTranscriptionProviderReceipt,
+  rerankQueryEntries,
+  synthesizeSnapshotIntelligence,
+  transcribeAudioFile,
+} from "./llm.js";
 import { resolveMediaAnalysisArtifact as resolveMediaAnalysisWithAdapter } from "./media-analysis.js";
 
 interface SignalRule {
@@ -108,6 +122,19 @@ interface ConceptArticleInput {
 
 const MAX_RELATED_REFERENCES = 6;
 const MAX_QUERY_RESULTS = 12;
+const TRANSCRIPT_ARTIFACT_SCHEMA_VERSION = 1;
+const MEDIA_ANALYSIS_ARTIFACT_SCHEMA_VERSION = 1;
+const SEARCH_STOPWORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "how", "i", "if", "in", "into",
+  "is", "it", "of", "on", "or", "so", "that", "the", "their", "this", "to", "what", "with", "you", "your",
+]);
+const SPARSE_SIGNAL_EVIDENCE = "fallback signal from sparse local context";
+const TEXT_LED_FORMAL_EVIDENCE_PATTERNS = {
+  motif: [/\bb-?roll\b/i, /\bmontage\b/i, /\bvoiceover\b/i, /\bclose-?up\b/i, /\bambient audio\b/i],
+  visual: [/\bvisual\b/i, /\bcamera\b/i, /\bframe\b/i, /\bshot\b/i, /\bclose-?up\b/i, /\bmovement trace\b/i],
+  audio: [/\baudio\b/i, /\bvoiceover\b/i, /\bsound\b/i, /\bmusic\b/i, /\broom tone\b/i, /\bbreath\b/i, /\bspoken\b/i],
+  pacing: [/\bpacing\b/i, /\blingering\b/i, /\bsteady build\b/i, /\bquick cuts?\b/i, /\brhythm\b/i],
+} as const;
 
 const CREATIVE_GUARDRAILS = [
   "Voice-first. Reuse the creator's actual language when it is usable.",
@@ -140,12 +167,12 @@ const CONTRAST_RULES = [
 
 const THEME_RULES: SignalRule[] = [
   { slug: "long-distance", label: "Long Distance", keywords: ["long distance", "far away", "miles apart", "distance", "separated", "absence"] },
-  { slug: "tenderness", label: "Tenderness", keywords: ["soft", "tender", "gentle", "care", "warm", "comfort", "intimate"] },
-  { slug: "discipline", label: "Discipline", keywords: ["discipline", "routine", "practice", "focus", "consistency", "habit", "grind"] },
-  { slug: "identity", label: "Identity", keywords: ["identity", "who i am", "becoming", "self", "version of me", "name", "belonging"] },
-  { slug: "ambition", label: "Ambition", keywords: ["ambition", "career", "dream", "goal", "building", "future", "making it"] },
-  { slug: "reflection", label: "Reflection", keywords: ["journal", "reflect", "thinking", "processing", "note to self", "learned"] },
-  { slug: "intimacy", label: "Intimacy", keywords: ["relationship", "love", "close", "hold", "together", "private", "heart"] },
+  { slug: "tenderness", label: "Tenderness", keywords: ["tender", "gentle", "care", "comfort", "intimate", "softness"] },
+  { slug: "discipline", label: "Discipline", keywords: ["discipline", "routine", "practice", "focus", "consistency", "habit", "smoke tests"] },
+  { slug: "identity", label: "Identity", keywords: ["identity", "who i am", "becoming", "version of me", "name", "belonging"] },
+  { slug: "ambition", label: "Ambition", keywords: ["ambition", "career", "dream", "goal", "making it", "self-improvement", "better person"] },
+  { slug: "reflection", label: "Reflection", keywords: ["journal", "reflect", "processing", "note to self", "learned", "trying to understand", "looking back"] },
+  { slug: "intimacy", label: "Intimacy", keywords: ["relationship", "private", "heart", "closeness", "together", "apart"] },
   { slug: "restlessness", label: "Restlessness", keywords: ["bored", "stuck", "restless", "drift", "waiting", "itch", "unsettled"] },
 ];
 
@@ -203,11 +230,11 @@ const PACING_RULES: SignalRule[] = [
 
 const STORY_RULES: SignalRule[] = [
   { slug: "confession", label: "Confession", keywords: ["admit", "say out loud", "confession", "honest"] },
-  { slug: "observation", label: "Observation", keywords: ["noticing", "watching", "small detail", "observing"] },
+  { slug: "observation", label: "Observation", keywords: ["noticing", "small detail", "observing", "i realized", "paying attention"] },
   { slug: "transformation", label: "Transformation", keywords: ["becoming", "change", "shift", "before and after"] },
   { slug: "memory-return", label: "Memory Return", keywords: ["remember", "returning", "again", "keeps coming back"] },
   { slug: "instruction", label: "Instruction", keywords: ["how to", "breakdown", "explain", "step by step"] },
-  { slug: "relationship-tension", label: "Relationship Tension", keywords: ["friend", "love", "apart", "distance", "together"] },
+  { slug: "relationship-tension", label: "Relationship Tension", keywords: ["friend", "apart", "distance", "together", "relationship"] },
 ];
 
 const FALLBACK_THEMES: SignalRule[] = [
@@ -318,7 +345,7 @@ export async function createCapture(
     path: toRel(root, asset.path),
   }));
   const ingestionMode = deriveIngestionMode(note, assets.length);
-  const acquisition = deriveCaptureAcquisition(sourceUrl, assets, createdAt);
+  const acquisitionState = deriveInitialCaptureAcquisitionState(sourceUrl, assets, createdAt, metadata.status);
 
   const record: CaptureRecord = {
     id,
@@ -334,7 +361,9 @@ export async function createCapture(
     status: "captured",
     createdAt,
     updatedAt: createdAt,
-    acquisition,
+    acquisition: acquisitionState.acquisition,
+    acquisitionCoverage: acquisitionState.coverage,
+    acquisitionAttempts: acquisitionState.attempts,
     rawPaths: {
       inbox: toRel(root, path.join(root, "raw", "inbox", `${id}.md`)),
       capture: toRel(root, path.join(root, "raw", "captures", `${id}.json`)),
@@ -344,6 +373,7 @@ export async function createCapture(
       artifacts: {
         transcript: null,
         mediaAnalysis: null,
+        moments: null,
       },
     },
     metadata,
@@ -387,6 +417,7 @@ export function deleteCapture(root: string, id: string): void {
   safeRemove(capture.rawPaths.analysis);
   safeRemove(capture.rawPaths.artifacts.transcript);
   safeRemove(capture.rawPaths.artifacts.mediaAnalysis);
+  safeRemove(capture.rawPaths.artifacts.moments);
   safeRemove(capture.rawPaths.referencePage);
   // Remove the whole media dir (covers assets and any other artifacts)
   const mediaDir = path.join(root, "raw", "media", id);
@@ -398,36 +429,66 @@ export function deleteCapture(root: string, id: string): void {
 export async function runAnalysis(root: string, captureId: string): Promise<AnalysisResult> {
   ensureAftertasteWorkspace(root);
   const paths = getAftertastePaths(root);
-  const capture = readCapture(root, captureId);
+  let capture = readCapture(root, captureId);
+  capture = await maybeRefreshCaptureMetadataForAnalysis(root, capture);
   const transcriptArtifact = await ensureTranscriptArtifact(root, capture);
   const mediaAnalysisArtifact = await ensureMediaAnalysisArtifact(root, capture, transcriptArtifact);
   const combinedText = collectCaptureText(capture, transcriptArtifact.text);
+  const evidenceText = collectCaptureEvidenceText(capture, transcriptArtifact.text);
+  const llmSignals = await analyzeCaptureSignals({
+    sourceKind: capture.sourceKind,
+    transcriptSource: transcriptArtifact.source,
+    hasMediaAssets: capture.assets.length > 0,
+    captureText: evidenceText,
+    vocabulary: {
+      themes: THEME_RULES.map(({ slug, label }) => ({ slug, label })),
+      motifs: MOTIF_RULES.map(({ slug, label }) => ({ slug, label })),
+      formatSignals: FORMAT_RULES.map(({ slug, label }) => ({ slug, label })),
+      toneSignals: TONE_RULES.map(({ slug, label }) => ({ slug, label })),
+      visualSignals: VISUAL_RULES.map(({ slug, label }) => ({ slug, label })),
+      audioSignals: AUDIO_RULES.map(({ slug, label }) => ({ slug, label })),
+      pacingSignals: PACING_RULES.map(({ slug, label }) => ({ slug, label })),
+      storySignals: STORY_RULES.map(({ slug, label }) => ({ slug, label })),
+    },
+  });
   const creatorSignals = extractCreatorSignals(capture);
-  const themes = rankSignals(combinedText, THEME_RULES, FALLBACK_THEMES, capture.assets);
-  const motifs = rankSignals(combinedText, MOTIF_RULES, FALLBACK_MOTIFS, capture.assets);
-  const formatSignals = rankSignals(combinedText, FORMAT_RULES, [], capture.assets);
-  const toneSignals = rankAnalysisSignals(combinedText, TONE_RULES, [], capture);
+  const allowExploratoryFallbacks = shouldApplyExploratoryFallbacks(transcriptArtifact);
+  const llmThemes = materializeGroundedSignals(llmSignals?.themes ?? [], THEME_RULES, evidenceText);
+  const llmMotifs = materializeGroundedSignals(llmSignals?.motifs ?? [], MOTIF_RULES, evidenceText);
+  const llmFormats = materializeGroundedSignals(llmSignals?.formatSignals ?? [], FORMAT_RULES, evidenceText);
+  const llmToneSignals = materializeGroundedSignals(llmSignals?.toneSignals ?? [], TONE_RULES, evidenceText);
+  const llmVisualSignals = materializeGroundedSignals(llmSignals?.visualSignals ?? [], VISUAL_RULES, evidenceText);
+  const llmAudioSignals = materializeGroundedSignals(llmSignals?.audioSignals ?? [], AUDIO_RULES, evidenceText);
+  const llmPacingSignals = materializeGroundedSignals(llmSignals?.pacingSignals ?? [], PACING_RULES, evidenceText);
+  const llmStorySignals = materializeGroundedSignals(llmSignals?.storySignals ?? [], STORY_RULES, evidenceText);
+  const themes = llmSignals
+    ? llmThemes
+    : rankSignals(combinedText, THEME_RULES, allowExploratoryFallbacks ? FALLBACK_THEMES : [], capture.assets);
+  const motifs = llmSignals
+    ? llmMotifs
+    : rankSignals(combinedText, MOTIF_RULES, allowExploratoryFallbacks ? FALLBACK_MOTIFS : [], capture.assets);
+  const formatSignals = llmSignals ? llmFormats : rankSignals(combinedText, FORMAT_RULES, [], capture.assets);
+  const toneSignals = llmSignals ? llmToneSignals : rankAnalysisSignals(combinedText, TONE_RULES, [], capture);
   const visualSignals =
     mediaAnalysisArtifact.status === "ok" && mediaAnalysisArtifact.visualSignals.length > 0
       ? mediaAnalysisArtifact.visualSignals
-      : rankAnalysisSignals(combinedText, VISUAL_RULES, [], capture);
+      : llmSignals
+        ? llmVisualSignals
+        : rankAnalysisSignals(combinedText, VISUAL_RULES, [], capture);
   const audioSignals =
     mediaAnalysisArtifact.status === "ok" && mediaAnalysisArtifact.audioSignals.length > 0
       ? mediaAnalysisArtifact.audioSignals
-      : rankAnalysisSignals(combinedText, AUDIO_RULES, [], capture);
-  const pacingSignals = rankAnalysisSignals(combinedText, PACING_RULES, [], capture);
+      : llmSignals
+        ? llmAudioSignals
+        : rankAnalysisSignals(combinedText, AUDIO_RULES, [], capture);
+  const pacingSignals = llmSignals ? llmPacingSignals : rankAnalysisSignals(combinedText, PACING_RULES, [], capture);
   const storySignals =
     mediaAnalysisArtifact.status === "ok" && mediaAnalysisArtifact.storySignals.length > 0
       ? mediaAnalysisArtifact.storySignals
-      : rankAnalysisSignals(combinedText, STORY_RULES, [], capture);
-  const openQuestions = buildAnalysisOpenQuestions(capture, {
-    themes,
-    toneSignals,
-    visualSignals,
-    audioSignals,
-    storySignals,
-  });
-  const moments = buildAnalysisMoments(capture, {
+      : llmSignals
+        ? llmStorySignals
+        : rankAnalysisSignals(combinedText, STORY_RULES, [], capture);
+  const momentsArtifact = buildCaptureMomentsArtifact(capture, transcriptArtifact, mediaAnalysisArtifact, {
     themes,
     motifs,
     toneSignals,
@@ -435,14 +496,24 @@ export async function runAnalysis(root: string, captureId: string): Promise<Anal
     audioSignals,
     pacingSignals,
     storySignals,
-    mediaAnalysisArtifact,
   });
-  const summary = summarizeCapture(capture, themes, motifs, formatSignals, creatorSignals, {
+  writeJson(getMomentsArtifactPath(root, captureId), momentsArtifact);
+  const openQuestions = buildAnalysisOpenQuestions(capture, {
+    themes,
     toneSignals,
     visualSignals,
     audioSignals,
     storySignals,
   });
+  const llmOpenQuestions = uniqueStrings((llmSignals?.openQuestions ?? []).map((question) => question.trim()).filter(Boolean));
+  const moments = toReferenceMoments(momentsArtifact).slice(0, 6);
+  const summary = llmSignals?.summary?.trim()
+    || summarizeCapture(capture, themes, motifs, formatSignals, creatorSignals, {
+      toneSignals,
+      visualSignals,
+      audioSignals,
+      storySignals,
+    });
   const analysis: AnalysisResult = {
     captureId,
     mode: capture.assets.length > 0 ? "hybrid" : "text-first",
@@ -470,7 +541,7 @@ export async function runAnalysis(root: string, captureId: string): Promise<Anal
     summary,
     confidence: Math.min(0.94, 0.52 + themes.length * 0.08 + motifs.length * 0.06 + (capture.assets.length > 0 ? 0.08 : 0)),
     assetInsights: buildAssetInsights(capture, mediaAnalysisArtifact),
-    openQuestions,
+    openQuestions: uniqueStrings([...llmOpenQuestions, ...openQuestions]).slice(0, 5),
     moments,
     generatedAt: new Date().toISOString(),
   };
@@ -478,11 +549,20 @@ export async function runAnalysis(root: string, captureId: string): Promise<Anal
   const analysisPath = path.join(paths.rawMediaDir, captureId, "analysis.json");
   fs.mkdirSync(path.dirname(analysisPath), { recursive: true });
   writeJson(analysisPath, analysis);
+  const transcriptAcquisitionAttempt = deriveTranscriptAcquisitionAttempt(
+    capture,
+    transcriptArtifact,
+    toRel(root, getTranscriptArtifactPath(root, captureId)),
+  );
 
   const updatedCapture: CaptureRecord = {
     ...capture,
     status: "analyzed",
     updatedAt: analysis.generatedAt,
+    acquisitionAttempts: mergeAcquisitionAttempts(
+      capture.acquisitionAttempts ?? deriveInitialAcquisitionAttempts(capture.sourceUrl, capture.assets, capture.createdAt),
+      transcriptAcquisitionAttempt ? [transcriptAcquisitionAttempt] : [],
+    ),
     rawPaths: {
       ...capture.rawPaths,
       analysis: toRel(root, analysisPath),
@@ -491,10 +571,17 @@ export async function runAnalysis(root: string, captureId: string): Promise<Anal
       artifacts: {
         transcript: toRel(root, getTranscriptArtifactPath(root, captureId)),
         mediaAnalysis: toRel(root, getMediaAnalysisArtifactPath(root, captureId)),
+        moments: toRel(root, getMomentsArtifactPath(root, captureId)),
       },
     },
   };
+  updatedCapture.acquisition = summarizeCaptureAcquisition(updatedCapture.acquisitionAttempts ?? []);
+  updatedCapture.acquisitionCoverage = determineAcquisitionCoverage(
+    updatedCapture.acquisitionAttempts ?? [],
+    updatedCapture.metadata.status,
+  );
   writeJson(path.join(root, updatedCapture.rawPaths.capture), updatedCapture);
+  writeText(path.join(root, updatedCapture.rawPaths.inbox), buildInboxMarkdown(updatedCapture));
   appendLog(root, `## [${timeStamp()}] analyze | ${captureId} — ${analysis.mode}`);
   return analysis;
 }
@@ -538,6 +625,15 @@ export function getCurrentSnapshot(root: string): TasteSnapshot {
   return withSnapshotDefaults(readJson<TasteSnapshot>(paths.snapshotJson));
 }
 
+export async function getCurrentSnapshotSmart(root: string): Promise<TasteSnapshot> {
+  ensureAftertasteWorkspace(root);
+  const paths = getAftertastePaths(root);
+  if (!fs.existsSync(paths.snapshotJson)) {
+    compileAftertaste(root);
+  }
+  return refineSnapshotIntelligence(root);
+}
+
 export function listReferences(
   root: string,
   filters?: {
@@ -554,7 +650,13 @@ export function listReferences(
     compileAftertaste(root);
   }
   const all = readCompiledReferences(root);
-  const filtered = all.filter((reference) => matchReference(reference, filters));
+  const filtered = all
+    .filter((reference) => matchReference(reference, filters))
+    .sort((left, right) =>
+      scoreReferenceMatch(right, filters) - scoreReferenceMatch(left, filters) ||
+      right.createdAt.localeCompare(left.createdAt) ||
+      left.title.localeCompare(right.title),
+    );
   return {
     references: filtered,
     filters: buildFilters(all),
@@ -587,6 +689,41 @@ export function searchQueryIndex(
 
   return {
     results: filtered,
+  };
+}
+
+export async function searchQueryIndexSmart(
+  root: string,
+  filters?: {
+    q?: string;
+    theme?: string;
+    motif?: string;
+    creator?: string;
+    format?: string;
+    platform?: string;
+    start?: string;
+    end?: string;
+    kind?: QueryIndexEntry["kind"][];
+    limit?: number;
+  },
+): Promise<QuerySearchResponse> {
+  const base = searchQueryIndex(root, filters);
+  const q = filters?.q?.trim() ?? "";
+  if (q.length < 3 || base.results.length < 2) return base;
+
+  const rerankedIds = await rerankQueryEntries({
+    query: q,
+    candidates: base.results.slice(0, Math.min(10, base.results.length)),
+  });
+  if (!rerankedIds || rerankedIds.length === 0) return base;
+
+  const rankedSet = new Set(rerankedIds);
+  const byId = new Map(base.results.map((entry) => [entry.id, entry]));
+  return {
+    results: [
+      ...rerankedIds.map((id) => byId.get(id)).filter((entry): entry is QueryIndexEntry => entry != null),
+      ...base.results.filter((entry) => !rankedSet.has(entry.id)),
+    ].slice(0, filters?.limit ?? MAX_QUERY_RESULTS),
   };
 }
 
@@ -703,7 +840,7 @@ export async function generateIdeas(root: string, request: IdeaRequest): Promise
     outputs,
     generatedAt,
   };
-  writeJson(path.join(getAftertastePaths(root).outputsIdeasDir, `${snapshot.id}-${Date.now()}.json`), response);
+  writeJson(path.join(getAftertastePaths(root).outputsIdeasDir, `${session.id}.json`), response);
   writeCreativeSession(root, session);
   appendLog(
     root,
@@ -726,6 +863,11 @@ function normalizeSourceUrl(value: string): string {
 }
 
 async function fetchUrlMetadata(sourceUrl: string): Promise<UrlMetadata> {
+  if (isRedditUrl(sourceUrl)) {
+    const redditMetadata = await tryFetchRedditMetadata(sourceUrl);
+    if (redditMetadata) return redditMetadata;
+  }
+
   try {
     const response = await fetch(sourceUrl, {
       redirect: "follow",
@@ -770,6 +912,26 @@ async function fetchUrlMetadata(sourceUrl: string): Promise<UrlMetadata> {
   }
 }
 
+function isRedditVerificationMetadata(metadata: UrlMetadata): boolean {
+  return /please wait for verification/i.test([metadata.title, metadata.description].filter(Boolean).join(" "));
+}
+
+async function maybeRefreshCaptureMetadataForAnalysis(root: string, capture: CaptureRecord): Promise<CaptureRecord> {
+  if (!isRedditUrl(capture.sourceUrl)) return capture;
+  if (capture.metadata.status === "ok" && !isRedditVerificationMetadata(capture.metadata)) return capture;
+
+  const refreshed = await fetchUrlMetadata(capture.sourceUrl);
+  if (refreshed.status !== "ok" || isRedditVerificationMetadata(refreshed)) return capture;
+
+  const updatedCapture: CaptureRecord = {
+    ...capture,
+    metadata: refreshed,
+  };
+  writeJson(path.join(root, capture.rawPaths.capture), updatedCapture);
+  writeText(path.join(root, capture.rawPaths.inbox), buildInboxMarkdown(updatedCapture));
+  return updatedCapture;
+}
+
 function readMeta(html: string, attr: string, key: string): string | null {
   const pattern = new RegExp(`<meta[^>]*${attr}=["']${escapeRegex(key)}["'][^>]*content=["']([^"']+)["'][^>]*>`, "i");
   const reversedPattern = new RegExp(`<meta[^>]*content=["']([^"']+)["'][^>]*${attr}=["']${escapeRegex(key)}["'][^>]*>`, "i");
@@ -794,6 +956,10 @@ function decodeEntities(value: string): string {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .trim();
+}
+
+function truncateInline(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, Math.max(0, max - 1))}…` : value;
 }
 
 function escapeRegex(value: string): string {
@@ -821,7 +987,7 @@ function writeAssets(dir: string, inputs: CaptureAssetInput[]): CaptureAsset[] {
     const id = crypto.randomBytes(3).toString("hex");
     const fileName = `${baseName || "asset"}-${id}${extension}`;
     const fullPath = path.join(dir, fileName);
-    const content = Buffer.from(stripDataPrefix(input.dataBase64), "base64");
+    const content = decodeBase64Asset(input.dataBase64);
     fs.writeFileSync(fullPath, content);
     return {
       id,
@@ -838,6 +1004,24 @@ function writeAssets(dir: string, inputs: CaptureAssetInput[]): CaptureAsset[] {
 function stripDataPrefix(value: string): string {
   const index = value.indexOf(",");
   return index >= 0 ? value.slice(index + 1) : value;
+}
+
+function decodeBase64Asset(value: string): Buffer {
+  const raw = stripDataPrefix(value).replace(/\s+/g, "");
+  if (!raw) {
+    throw new Error("asset dataBase64 must contain base64 bytes");
+  }
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(raw) || raw.length % 4 !== 0) {
+    throw new Error("asset dataBase64 must be valid base64");
+  }
+
+  const content = Buffer.from(raw, "base64");
+  const normalizedInput = raw.replace(/=+$/u, "");
+  const normalizedRoundTrip = content.toString("base64").replace(/=+$/u, "");
+  if (normalizedInput !== normalizedRoundTrip) {
+    throw new Error("asset dataBase64 must be valid base64");
+  }
+  return content;
 }
 
 function safeExtension(fileName: string): string {
@@ -864,62 +1048,270 @@ function deriveIngestionMode(note: string, assetCount: number): CaptureRecord["i
   return "link";
 }
 
-function deriveCaptureAcquisition(
+function deriveInitialCaptureAcquisitionState(
   sourceUrl: string,
   assets: CaptureAsset[],
   createdAt: string,
-): CaptureAcquisitionRecord {
+  metadataStatus: UrlMetadata["status"],
+): {
+  acquisition: CaptureAcquisitionRecord;
+  coverage: CaptureAcquisitionCoverage;
+  attempts: CaptureAcquisitionAttemptRecord[];
+} {
+  const attempts = deriveInitialAcquisitionAttempts(sourceUrl, assets, createdAt);
+  return {
+    acquisition: summarizeCaptureAcquisition(attempts),
+    coverage: determineAcquisitionCoverage(attempts, metadataStatus),
+    attempts,
+  };
+}
+
+function deriveInitialAcquisitionAttempts(
+  sourceUrl: string,
+  assets: CaptureAsset[],
+  createdAt: string,
+): CaptureAcquisitionAttemptRecord[] {
   if (assets.length > 0) {
     if (isInstagramReelUrl(sourceUrl)) {
-      return {
+      return [
+        buildAcquisitionAttempt({
+          target: "media-bytes",
+          mode: "user-upload",
+          status: "ok",
+          provider: "local-upload",
+          acquiredAt: createdAt,
+          sourceUrl,
+          notes: [
+            "Instagram Reel saved with local uploaded media bytes.",
+            "The source URL remains a reference pointer; transcript and media analysis can use the uploaded file without implying public Reel extraction.",
+          ],
+        }),
+      ];
+    }
+    return [
+      buildAcquisitionAttempt({
+        target: "media-bytes",
         mode: "user-upload",
         status: "ok",
         provider: "local-upload",
         acquiredAt: createdAt,
         sourceUrl,
         notes: [
-          "Instagram Reel saved with local uploaded media bytes.",
-          "The source URL remains a reference pointer; transcript and media analysis can use the uploaded file without implying public Reel extraction.",
+          "Capture includes local uploaded media bytes.",
         ],
-      };
-    }
-    return {
-      mode: "user-upload",
-      status: "ok",
-      provider: "local-upload",
-      acquiredAt: createdAt,
-      sourceUrl,
-      notes: [
-        "Capture includes local uploaded media bytes.",
-      ],
-    };
+      }),
+    ];
   }
 
   if (isInstagramReelUrl(sourceUrl)) {
-    return {
+    return [
+      buildAcquisitionAttempt({
+        target: "source-pointer",
+        mode: "source-link",
+        status: "unavailable",
+        provider: "unknown",
+        acquiredAt: null,
+        sourceUrl,
+        notes: [
+          "Instagram Reel URL saved as a source pointer only.",
+          "No media bytes were acquired during capture, so transcript and media understanding remain metadata-plus-note driven until a local upload or official acquisition path exists.",
+        ],
+      }),
+    ];
+  }
+
+  return [
+    buildAcquisitionAttempt({
+      target: "source-pointer",
       mode: "source-link",
-      status: "unavailable",
+      status: "pending",
       provider: "unknown",
       acquiredAt: null,
       sourceUrl,
       notes: [
-        "Instagram Reel URL saved as a source pointer only.",
-        "No media bytes were acquired during capture, so transcript and media understanding remain metadata-plus-note driven until a local upload or official acquisition path exists.",
+        "Capture currently stores the source link only.",
+        "Analyze may recover transcript text later, but no local media bytes have been acquired yet.",
       ],
+    }),
+  ];
+}
+
+function buildAcquisitionAttempt(input: {
+  target: CaptureAcquisitionAttemptRecord["target"];
+  mode: CaptureAcquisitionRecord["mode"];
+  status: CaptureAcquisitionRecord["status"];
+  provider: CaptureAcquisitionRecord["provider"];
+  acquiredAt: string | null;
+  sourceUrl: string | null;
+  notes: string[];
+  error?: string;
+  artifactPath?: string | null;
+}): CaptureAcquisitionAttemptRecord {
+  return {
+    id: `${input.target}:${input.mode}:${input.provider}`,
+    target: input.target,
+    mode: input.mode,
+    status: input.status,
+    provider: input.provider,
+    acquiredAt: input.acquiredAt,
+    sourceUrl: input.sourceUrl,
+    notes: uniqueStrings(input.notes),
+    error: input.error,
+    artifactPath: input.artifactPath ?? null,
+  };
+}
+
+function summarizeCaptureAcquisition(attempts: CaptureAcquisitionAttemptRecord[]): CaptureAcquisitionRecord {
+  const successful = attempts
+    .filter((attempt) => attempt.status === "ok" || attempt.status === "partial")
+    .sort(compareAcquisitionAttempts);
+  const pointer = attempts.find((attempt) => attempt.target === "source-pointer");
+  const best = successful[0] ?? pointer ?? [...attempts].sort(compareAcquisitionAttempts)[0];
+  if (best) {
+    return {
+      mode: best.mode,
+      status: best.status,
+      provider: best.provider,
+      acquiredAt: best.acquiredAt,
+      sourceUrl: best.sourceUrl,
+      notes: best.notes,
+      error: best.error,
     };
   }
-
   return {
     mode: "source-link",
     status: "pending",
     provider: "unknown",
     acquiredAt: null,
-    sourceUrl,
-    notes: [
-      "Capture currently stores the source link only.",
-      "Analyze may recover transcript text later, but no local media bytes have been acquired yet.",
-    ],
+    sourceUrl: null,
+    notes: [],
   };
+}
+
+function compareAcquisitionAttempts(left: CaptureAcquisitionAttemptRecord, right: CaptureAcquisitionAttemptRecord): number {
+  return acquisitionAttemptScore(right) - acquisitionAttemptScore(left);
+}
+
+function acquisitionAttemptScore(attempt: CaptureAcquisitionAttemptRecord): number {
+  const targetScore =
+    attempt.target === "media-bytes"
+      ? 300
+      : attempt.target === "transcript-text"
+        ? 200
+        : 100;
+  const statusScore =
+    attempt.status === "ok"
+      ? 50
+      : attempt.status === "partial"
+        ? 40
+        : attempt.status === "pending"
+          ? 30
+          : attempt.status === "unavailable"
+            ? 20
+            : 10;
+  const acquiredAtScore = attempt.acquiredAt ? Date.parse(attempt.acquiredAt) / 1_000_000_000_000 : 0;
+  return targetScore + statusScore + acquiredAtScore;
+}
+
+function determineAcquisitionCoverage(
+  attempts: CaptureAcquisitionAttemptRecord[],
+  metadataStatus: UrlMetadata["status"],
+): CaptureAcquisitionCoverage {
+  if (attempts.some((attempt) => attempt.target === "media-bytes" && (attempt.status === "ok" || attempt.status === "partial"))) {
+    return "byte-backed";
+  }
+  if (attempts.some((attempt) => attempt.target === "transcript-text" && (attempt.status === "ok" || attempt.status === "partial"))) {
+    return "transcript-backed";
+  }
+  return metadataStatus === "ok" ? "metadata-only" : "url-only";
+}
+
+function mergeAcquisitionAttempts(
+  base: CaptureAcquisitionAttemptRecord[],
+  additions: CaptureAcquisitionAttemptRecord[],
+): CaptureAcquisitionAttemptRecord[] {
+  const merged = new Map<string, CaptureAcquisitionAttemptRecord>();
+  for (const attempt of base) merged.set(attempt.id, attempt);
+  for (const attempt of additions) {
+    const existing = merged.get(attempt.id);
+    merged.set(attempt.id, existing ? choosePreferredAcquisitionAttempt(existing, attempt) : attempt);
+  }
+  return [...merged.values()].sort(compareAcquisitionAttempts);
+}
+
+function choosePreferredAcquisitionAttempt(
+  left: CaptureAcquisitionAttemptRecord,
+  right: CaptureAcquisitionAttemptRecord,
+): CaptureAcquisitionAttemptRecord {
+  return acquisitionAttemptScore(right) >= acquisitionAttemptScore(left) ? right : left;
+}
+
+function deriveTranscriptAcquisitionAttempt(
+  capture: CaptureRecord,
+  transcriptArtifact: TranscriptArtifact,
+  artifactPath: string,
+): CaptureAcquisitionAttemptRecord | null {
+  if (transcriptArtifact.source === "capture-stitch") {
+    return transcriptArtifact.status === "unavailable" || transcriptArtifact.status === "error"
+      ? buildAcquisitionAttempt({
+          target: "transcript-text",
+          mode: "best-effort-extractor",
+          status: transcriptArtifact.status,
+          provider: "unknown",
+          acquiredAt: null,
+          sourceUrl: capture.sourceUrl,
+          notes: uniqueStrings([
+            "Analyze could not acquire a source transcript artifact.",
+            ...transcriptArtifact.provenance.notes,
+          ]),
+          error: transcriptArtifact.error,
+          artifactPath,
+        })
+      : null;
+  }
+
+  if (transcriptArtifact.source === "manual") {
+    return buildAcquisitionAttempt({
+      target: "transcript-text",
+      mode: "manual-transcript",
+      status: transcriptArtifact.status,
+      provider: "manual",
+      acquiredAt: transcriptArtifact.generatedAt,
+      sourceUrl: capture.sourceUrl,
+      notes: transcriptArtifact.provenance.notes,
+      error: transcriptArtifact.error,
+      artifactPath,
+    });
+  }
+
+  if (transcriptArtifact.source === "audio-upload") {
+    return buildAcquisitionAttempt({
+      target: "transcript-text",
+      mode: "user-upload",
+      status: transcriptArtifact.status,
+      provider: "local-upload",
+      acquiredAt: transcriptArtifact.generatedAt,
+      sourceUrl: capture.sourceUrl,
+      notes: uniqueStrings([
+        "Transcript was recovered from locally uploaded audio bytes.",
+        ...transcriptArtifact.provenance.notes,
+      ]),
+      error: transcriptArtifact.error,
+      artifactPath,
+    });
+  }
+
+  return buildAcquisitionAttempt({
+    target: "transcript-text",
+    mode: "best-effort-extractor",
+    status: transcriptArtifact.status,
+    provider: "unknown",
+    acquiredAt: transcriptArtifact.status === "ok" ? transcriptArtifact.generatedAt : null,
+    sourceUrl: capture.sourceUrl,
+    notes: transcriptArtifact.provenance.notes,
+    error: transcriptArtifact.error,
+    artifactPath,
+  });
 }
 
 function isInstagramReelUrl(sourceUrl: string): boolean {
@@ -948,6 +1340,7 @@ function buildInboxMarkdown(record: CaptureRecord): string {
     `- Acquisition mode: ${record.acquisition?.mode ?? "source-link"}`,
     `- Acquisition status: ${record.acquisition?.status ?? "pending"}`,
     `- Acquisition provider: ${record.acquisition?.provider ?? "unknown"}`,
+    `- Acquisition coverage: ${record.acquisitionCoverage ?? "url-only"}`,
     "",
     "## Why I saved this",
     record.note ? record.note : "_No note yet._",
@@ -960,6 +1353,16 @@ function buildInboxMarkdown(record: CaptureRecord): string {
   ];
   if (record.acquisition?.notes.length) {
     parts.push("", "## Acquisition", ...record.acquisition.notes.map((note) => `- ${note}`));
+  }
+  if ((record.acquisitionAttempts?.length ?? 0) > 0) {
+    parts.push(
+      "",
+      "## Acquisition Attempts",
+      ...record.acquisitionAttempts!.map(
+        (attempt) =>
+          `- ${attempt.target} · ${attempt.mode} · ${attempt.status} · ${attempt.provider}${attempt.artifactPath ? ` · ${attempt.artifactPath}` : ""}`,
+      ),
+    );
   }
   if (record.assets.length > 0) {
     parts.push("", "## Assets", ...record.assets.map((asset) => `- ${asset.originalName} (${asset.mediaType}, ${asset.size} bytes)`));
@@ -988,6 +1391,19 @@ function collectCaptureText(capture: CaptureRecord, transcriptText?: string): st
     .filter(Boolean)
     .join(" \n ")
     .toLowerCase();
+}
+
+function collectCaptureEvidenceText(capture: CaptureRecord, transcriptText?: string): string {
+  return [
+    capture.note ? `Note: ${capture.note}` : "",
+    capture.savedReason ? `Saved reason: ${capture.savedReason}` : "",
+    capture.collection ? `Collection: ${capture.collection}` : "",
+    capture.metadata.title ? `Title: ${capture.metadata.title}` : "",
+    capture.metadata.description ? `Description: ${capture.metadata.description}` : "",
+    transcriptText ? `Transcript: ${transcriptText}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function extractCreatorSignals(capture: CaptureRecord): SignalTag[] {
@@ -1058,10 +1474,49 @@ function rankSignals(
       slug: rule.slug,
       label: rule.label,
       score: 0.48 - index * 0.06,
-      evidence: ["fallback signal from sparse local context"],
+      evidence: [SPARSE_SIGNAL_EVIDENCE],
     }));
   }
   return ranked.slice(0, 4);
+}
+
+function materializeGroundedSignals(
+  predictions: Array<{ slug: string; score: number; evidence: string[] }>,
+  rules: SignalRule[],
+  evidenceText: string,
+): SignalTag[] {
+  if (predictions.length === 0) return [];
+  const ruleBySlug = new Map(rules.map((rule) => [rule.slug, rule]));
+  const normalizedSource = normalizeGroundingText(evidenceText);
+  return aggregateSignals(
+    predictions
+      .map((prediction) => {
+        const rule = ruleBySlug.get(prediction.slug);
+        if (!rule) return null;
+        const groundedEvidence = uniqueStrings(
+          prediction.evidence.filter((snippet) => {
+            const normalizedSnippet = normalizeGroundingText(snippet);
+            return normalizedSnippet.length >= 4 && normalizedSource.includes(normalizedSnippet);
+          }),
+        ).slice(0, 3);
+        if (groundedEvidence.length === 0) return null;
+        return {
+          slug: rule.slug,
+          label: rule.label,
+          score: Math.min(0.98, Math.max(0.55, prediction.score)),
+          evidence: groundedEvidence,
+        };
+      })
+      .filter((signal): signal is SignalTag => signal !== null),
+  ).slice(0, 4);
+}
+
+function normalizeGroundingText(value: string): string {
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function shouldApplyExploratoryFallbacks(artifact: TranscriptArtifact): boolean {
+  return artifact.source === "capture-stitch" || artifact.status !== "ok";
 }
 
 function rankAnalysisSignals(
@@ -1139,17 +1594,69 @@ function summarizeCapture(
     storySignals: SignalTag[];
   },
 ): string {
-  const themeLabel = themes[0]?.label ?? "a developing thread";
-  const motifLabel = motifs[0]?.label ?? "soft pacing";
-  const formatLabel = formats[0]?.label ?? "a reflective short-form format";
-  const creatorLabel = creators[0]?.label ? ` with a pull toward ${creators[0]!.label}` : "";
+  const noteSnippet = sentenceCase(truncate(capture.note || capture.savedReason || "", 90));
+  const lead = summarizeCaptureLead(capture, noteSnippet);
+  const themeLabel = themes[0]?.label?.toLowerCase() ?? null;
+  const motifLabel = motifs[0]?.label?.toLowerCase() ?? null;
+  const formatLabel = formats[0]?.label?.toLowerCase() ?? null;
+  let readSentence = " It is still collecting stronger formal signal from the saved context.";
+  if (themeLabel) {
+    const readParts = [
+      themeLabel,
+      motifLabel ? `through ${motifLabel}` : null,
+      formatLabel ? `in a ${formatLabel}` : null,
+    ].filter((part): part is string => Boolean(part));
+    readSentence = ` It reads as ${readParts.join(" ")}${creators[0]?.label ? ` with a pull toward ${creators[0]!.label}` : ""}.`;
+  } else if (motifLabel && formatLabel) {
+    readSentence = ` It leans through ${motifLabel} in a ${formatLabel}.${creators[0]?.label ? ` There is also a pull toward ${creators[0]!.label}.` : ""}`;
+  } else if (motifLabel) {
+    readSentence = ` Its clearest craft cue is ${motifLabel}.${creators[0]?.label ? ` There is also a pull toward ${creators[0]!.label}.` : ""}`;
+  } else if (formatLabel) {
+    readSentence = ` Its clearest formal cue is ${formatLabel}.${creators[0]?.label ? ` There is also a pull toward ${creators[0]!.label}.` : ""}`;
+  }
   const toneLabel = extras.toneSignals[0]?.label ? ` The tone lands as ${extras.toneSignals[0]!.label.toLowerCase()}.` : "";
   const visualLabel = extras.visualSignals[0]?.label ? ` Visually it leans on ${extras.visualSignals[0]!.label.toLowerCase()}.` : "";
   const audioLabel = extras.audioSignals[0]?.label ? ` Audio-wise it suggests ${extras.audioSignals[0]!.label.toLowerCase()}.` : "";
   const storyLabel = extras.storySignals[0]?.label ? ` Structurally it feels closest to ${extras.storySignals[0]!.label.toLowerCase()}.` : "";
-  const noteSnippet = sentenceCase(truncate(capture.note || capture.savedReason || "", 90));
-  const lead = summarizeCaptureLead(capture, noteSnippet);
-  return `${lead} It reads as ${themeLabel.toLowerCase()} carried through ${motifLabel.toLowerCase()} in a ${formatLabel.toLowerCase()}${creatorLabel}.${toneLabel}${visualLabel}${audioLabel}${storyLabel}`.trim();
+  return `${lead}${readSentence}${toneLabel}${visualLabel}${audioLabel}${storyLabel}`.trim();
+}
+
+function repairReferenceSummary(
+  capture: CaptureRecord,
+  summary: string,
+  surfaceSignals: {
+    themes: SignalTag[];
+    motifs: SignalTag[];
+    creatorSignals: SignalTag[];
+    formatSignals: SignalTag[];
+    toneSignals: SignalTag[];
+    visualSignals: SignalTag[];
+    audioSignals: SignalTag[];
+    pacingSignals: SignalTag[];
+    storySignals: SignalTag[];
+  },
+): string {
+  const trimmed = summary.trim();
+  if (!trimmed) {
+    return summarizeCapture(capture, surfaceSignals.themes, surfaceSignals.motifs, surfaceSignals.formatSignals, surfaceSignals.creatorSignals, {
+      toneSignals: surfaceSignals.toneSignals,
+      visualSignals: surfaceSignals.visualSignals,
+      audioSignals: surfaceSignals.audioSignals,
+      storySignals: surfaceSignals.storySignals,
+    });
+  }
+  const needsRepair =
+    /It reads as in a /i.test(trimmed) ||
+    (surfaceSignals.visualSignals.length === 0 && /visually|movement trace|close-up|camera|frame|shot|b-roll/i.test(trimmed)) ||
+    (surfaceSignals.audioSignals.length === 0 && /audio-wise|voiceover|ambient audio|room tone|sound/i.test(trimmed)) ||
+    (surfaceSignals.pacingSignals.length === 0 && /pacing|lingering|steady build/i.test(trimmed));
+  if (!needsRepair) return trimmed;
+  return summarizeCapture(capture, surfaceSignals.themes, surfaceSignals.motifs, surfaceSignals.formatSignals, surfaceSignals.creatorSignals, {
+    toneSignals: surfaceSignals.toneSignals,
+    visualSignals: surfaceSignals.visualSignals,
+    audioSignals: surfaceSignals.audioSignals,
+    storySignals: surfaceSignals.storySignals,
+  });
 }
 
 function buildTranscript(capture: CaptureRecord, artifact?: TranscriptArtifact | null): string {
@@ -1255,8 +1762,10 @@ function buildAnalysisOpenQuestions(
   return uniqueStrings(questions).slice(0, 4);
 }
 
-function buildAnalysisMoments(
+function buildCaptureMomentsArtifact(
   capture: CaptureRecord,
+  transcriptArtifact: TranscriptArtifact,
+  mediaAnalysisArtifact: MediaAnalysisArtifact | null,
   signals: {
     themes: SignalTag[];
     motifs: SignalTag[];
@@ -1265,39 +1774,158 @@ function buildAnalysisMoments(
     audioSignals: SignalTag[];
     pacingSignals: SignalTag[];
     storySignals: SignalTag[];
-    mediaAnalysisArtifact?: MediaAnalysisArtifact | null;
   },
-): ReferenceMoment[] {
-  const moments: ReferenceMoment[] = (signals.mediaAnalysisArtifact?.moments ?? []).map((moment) => ({
-    label: moment.label,
-    description: moment.summary,
-  }));
+): CaptureMomentsArtifact {
+  const moments: CaptureMomentRecord[] = [];
+  const transcriptSignalTags = uniqueStrings([
+    ...signals.audioSignals.slice(0, 2).map((signal) => signal.slug),
+    ...signals.storySignals.slice(0, 2).map((signal) => signal.slug),
+    ...signals.themes.slice(0, 1).map((signal) => signal.slug),
+  ]).slice(0, 4);
   const visualLead = signals.visualSignals[0]?.label.toLowerCase() ?? signals.motifs[0]?.label.toLowerCase() ?? "visual texture";
   const audioLead = signals.audioSignals[0]?.label.toLowerCase() ?? "spoken cadence";
   const storyLead = signals.storySignals[0]?.label.toLowerCase() ?? signals.themes[0]?.label.toLowerCase() ?? "emotional pull";
 
+  const transcriptSegments = (transcriptArtifact.segments ?? [])
+    .map((segment, index) => ({ segment, index }))
+    .filter(({ segment }) => segment.text.trim().length >= 12)
+    .slice(0, 3);
+  for (const { segment, index } of transcriptSegments) {
+    moments.push({
+      id: `${capture.id}:transcript:${index}`,
+      captureId: capture.id,
+      kind: "transcript-segment",
+      label: segment.speaker ? `${segment.speaker} beat` : "Spoken beat",
+      summary: sentenceCase(truncate(segment.text.trim(), 140)),
+      startMs: segment.startMs,
+      endMs: segment.endMs,
+      speaker: segment.speaker,
+      assetId: null,
+      signalTags: transcriptSignalTags,
+      evidence: [
+        {
+          source: "transcript",
+          text: truncate(segment.text.trim(), 180),
+          segmentIndex: index,
+          signalSlugs: transcriptSignalTags,
+        },
+      ],
+    });
+  }
+
+  if (transcriptSegments.length === 0 && transcriptArtifact.source !== "capture-stitch" && transcriptArtifact.text.trim()) {
+    moments.push({
+      id: `${capture.id}:transcript:excerpt`,
+      captureId: capture.id,
+      kind: "transcript-segment",
+      label: "Transcript beat",
+      summary: sentenceCase(truncate(transcriptArtifact.text.trim(), 140)),
+      assetId: null,
+      signalTags: transcriptSignalTags,
+      evidence: [
+        {
+          source: "transcript",
+          text: truncate(transcriptArtifact.text.trim(), 180),
+          signalSlugs: transcriptSignalTags,
+        },
+      ],
+    });
+  }
+
+  const mediaMomentKind = capture.assets.some((asset) => asset.kind === "audio") && !capture.assets.some((asset) => asset.kind === "video" || asset.kind === "image")
+    ? "audio-beat"
+    : "visual-beat";
+  for (const [index, moment] of (mediaAnalysisArtifact?.moments ?? []).entries()) {
+    const signalTags = uniqueStrings([
+      ...signals.visualSignals.slice(0, 2).map((signal) => signal.slug),
+      ...signals.audioSignals.slice(0, 1).map((signal) => signal.slug),
+      ...signals.storySignals.slice(0, 1).map((signal) => signal.slug),
+    ]).slice(0, 4);
+    moments.push({
+      id: `${capture.id}:media:${index}`,
+      captureId: capture.id,
+      kind: mediaMomentKind,
+      label: moment.label,
+      summary: moment.summary,
+      startMs: moment.startMs,
+      endMs: moment.endMs,
+      assetId: null,
+      signalTags,
+      evidence: [
+        {
+          source: "media-analysis",
+          mediaMomentIndex: index,
+          text: truncate(moment.summary, 180),
+          signalSlugs: signalTags,
+        },
+      ],
+    });
+  }
+
   for (const asset of capture.assets.slice(0, 3)) {
     if (asset.kind === "image") {
       moments.push({
+        id: `${capture.id}:asset:${asset.id}`,
+        captureId: capture.id,
+        kind: "asset-beat",
         label: "Frame anchor",
-        description: `${asset.originalName} can anchor a beat with ${visualLead}.`,
+        summary: `${asset.originalName} can anchor a beat with ${visualLead}.`,
         assetId: asset.id,
+        signalTags: uniqueStrings(signals.visualSignals.slice(0, 3).map((signal) => signal.slug)),
+        evidence: [
+          {
+            source: "asset",
+            assetId: asset.id,
+            text: asset.originalName,
+            signalSlugs: uniqueStrings(signals.visualSignals.slice(0, 3).map((signal) => signal.slug)),
+          },
+        ],
       });
       continue;
     }
     if (asset.kind === "video") {
       moments.push({
+        id: `${capture.id}:asset:${asset.id}`,
+        captureId: capture.id,
+        kind: "asset-beat",
         label: "Movement beat",
-        description: `${asset.originalName} carries motion and pacing that could hold the middle of the piece.`,
+        summary: `${asset.originalName} carries motion and pacing that could hold the middle of the piece.`,
         assetId: asset.id,
+        signalTags: uniqueStrings([
+          ...signals.visualSignals.slice(0, 2).map((signal) => signal.slug),
+          ...signals.pacingSignals.slice(0, 2).map((signal) => signal.slug),
+        ]),
+        evidence: [
+          {
+            source: "asset",
+            assetId: asset.id,
+            text: asset.originalName,
+            signalSlugs: uniqueStrings([
+              ...signals.visualSignals.slice(0, 2).map((signal) => signal.slug),
+              ...signals.pacingSignals.slice(0, 2).map((signal) => signal.slug),
+            ]),
+          },
+        ],
       });
       continue;
     }
     if (asset.kind === "audio") {
       moments.push({
+        id: `${capture.id}:asset:${asset.id}`,
+        captureId: capture.id,
+        kind: "audio-beat",
         label: "Spoken beat",
-        description: `${asset.originalName} preserves ${audioLead} that should survive any rewrite.`,
+        summary: `${asset.originalName} preserves ${audioLead} that should survive any rewrite.`,
         assetId: asset.id,
+        signalTags: uniqueStrings(signals.audioSignals.slice(0, 3).map((signal) => signal.slug)),
+        evidence: [
+          {
+            source: "asset",
+            assetId: asset.id,
+            text: asset.originalName,
+            signalSlugs: uniqueStrings(signals.audioSignals.slice(0, 3).map((signal) => signal.slug)),
+          },
+        ],
       });
     }
   }
@@ -1305,24 +1933,84 @@ function buildAnalysisMoments(
   const noteSnippet = pickCaptureSnippet(capture);
   if (noteSnippet && (capture.sourceKind === "voice-note" || capture.sourceKind === "journal")) {
     moments.push({
+      id: `${capture.id}:note:anchor-line`,
+      captureId: capture.id,
+      kind: "anchor-line",
       label: "Anchor line",
-      description: `Protect the phrase "${noteSnippet}" before smoothing it out.`,
+      summary: `Protect the phrase "${noteSnippet}" before smoothing it out.`,
+      assetId: null,
+      signalTags: uniqueStrings([
+        ...signals.storySignals.slice(0, 2).map((signal) => signal.slug),
+        ...signals.themes.slice(0, 1).map((signal) => signal.slug),
+      ]),
+      evidence: [
+        {
+          source: "capture-note",
+          text: noteSnippet,
+          signalSlugs: uniqueStrings([
+            ...signals.storySignals.slice(0, 2).map((signal) => signal.slug),
+            ...signals.themes.slice(0, 1).map((signal) => signal.slug),
+          ]),
+        },
+      ],
     });
   } else if (noteSnippet && moments.length === 0) {
     moments.push({
+      id: `${capture.id}:note:anchor-beat`,
+      captureId: capture.id,
+      kind: "story-beat",
       label: "Anchor beat",
-      description: `"${noteSnippet}" feels like the most reusable emotional beat in this capture.`,
+      summary: `"${noteSnippet}" feels like the most reusable emotional beat in this capture.`,
+      assetId: null,
+      signalTags: uniqueStrings([
+        ...signals.storySignals.slice(0, 2).map((signal) => signal.slug),
+        ...signals.themes.slice(0, 1).map((signal) => signal.slug),
+      ]),
+      evidence: [
+        {
+          source: "capture-note",
+          text: noteSnippet,
+          signalSlugs: uniqueStrings([
+            ...signals.storySignals.slice(0, 2).map((signal) => signal.slug),
+            ...signals.themes.slice(0, 1).map((signal) => signal.slug),
+          ]),
+        },
+      ],
     });
   }
 
   if (capture.sourceKind === "moodboard" && moments.length < 2) {
     moments.push({
+      id: `${capture.id}:note:palette-beat`,
+      captureId: capture.id,
+      kind: "story-beat",
       label: "Palette beat",
-      description: `Let one image or object carry the ${storyLead} instead of trying to explain the whole moodboard at once.`,
+      summary: `Let one image or object carry the ${storyLead} instead of trying to explain the whole moodboard at once.`,
+      assetId: null,
+      signalTags: uniqueStrings([
+        ...signals.visualSignals.slice(0, 2).map((signal) => signal.slug),
+        ...signals.storySignals.slice(0, 1).map((signal) => signal.slug),
+      ]),
+      evidence: [
+        {
+          source: "capture-note",
+          text: noteSnippet || capture.savedReason || capture.note || null,
+          signalSlugs: uniqueStrings([
+            ...signals.visualSignals.slice(0, 2).map((signal) => signal.slug),
+            ...signals.storySignals.slice(0, 1).map((signal) => signal.slug),
+          ]),
+        },
+      ],
     });
   }
 
-  return dedupeMoments(moments).slice(0, 4);
+  return {
+    captureId: capture.id,
+    generatedAt: new Date().toISOString(),
+    transcriptGenerationId: transcriptArtifact.generation?.id ?? null,
+    mediaAnalysisGenerationId: mediaAnalysisArtifact?.generation?.id ?? null,
+    moments: dedupeCaptureMoments(moments).slice(0, 8),
+  };
 }
 
 function pickCaptureSnippet(capture: CaptureRecord): string {
@@ -1334,14 +2022,28 @@ function pickCaptureSnippet(capture: CaptureRecord): string {
   return truncate(snippet ?? "", 88);
 }
 
-function dedupeMoments(moments: ReferenceMoment[]): ReferenceMoment[] {
+function dedupeCaptureMoments(moments: CaptureMomentRecord[]): CaptureMomentRecord[] {
   const seen = new Set<string>();
   return moments.filter((moment) => {
-    const key = `${moment.label}::${moment.description}`;
+    const key = `${moment.kind}::${moment.label}::${moment.summary}::${moment.startMs ?? ""}::${moment.endMs ?? ""}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+}
+
+function toReferenceMoments(artifact: CaptureMomentsArtifact): ReferenceMoment[] {
+  return artifact.moments.map((moment) => ({
+    id: moment.id,
+    kind: moment.kind,
+    label: moment.label,
+    description: moment.summary,
+    assetId: moment.assetId ?? undefined,
+    startMs: moment.startMs,
+    endMs: moment.endMs,
+    speaker: moment.speaker,
+    signalTags: moment.signalTags,
+  }));
 }
 
 function buildReferenceOpenQuestions(capture: CaptureRecord, analysis: AnalysisResult): string[] {
@@ -1352,7 +2054,7 @@ function buildReferenceOpenQuestions(capture: CaptureRecord, analysis: AnalysisR
   if (capture.metadata.status === "error") {
     questions.push("Would a manual title or note sharpen what this capture is doing?");
   }
-  if (analysis.themes.every((theme) => theme.evidence.includes("fallback signal from sparse local context"))) {
+  if (analysis.themes.every((theme) => theme.evidence.includes(SPARSE_SIGNAL_EVIDENCE))) {
     questions.push("This summary is leaning on sparse signals. Which exact beat or frame should become canonical?");
   }
   return uniqueStrings(questions).slice(0, 4);
@@ -1371,6 +2073,27 @@ function toReferenceSummary(
   pagePath: string,
   compiledAt: string,
 ): ReferenceSummary {
+  const transcriptSource = analysis.transcriptProvenance.source;
+  const themes = surfaceReferenceSignals(capture, transcriptSource, analysis.themes, "theme");
+  const motifs = surfaceReferenceSignals(capture, transcriptSource, analysis.motifs, "motif");
+  const creatorSignals = surfaceReferenceSignals(capture, transcriptSource, analysis.creatorSignals, "creator");
+  const formatSignals = surfaceReferenceSignals(capture, transcriptSource, analysis.formatSignals, "format");
+  const toneSignals = surfaceReferenceSignals(capture, transcriptSource, analysis.toneSignals, "tone");
+  const visualSignals = surfaceReferenceSignals(capture, transcriptSource, analysis.visualSignals, "visual");
+  const audioSignals = surfaceReferenceSignals(capture, transcriptSource, analysis.audioSignals, "audio");
+  const pacingSignals = surfaceReferenceSignals(capture, transcriptSource, analysis.pacingSignals, "pacing");
+  const storySignals = surfaceReferenceSignals(capture, transcriptSource, analysis.storySignals, "story");
+  const surfaceSummary = repairReferenceSummary(capture, analysis.summary, {
+    themes,
+    motifs,
+    creatorSignals,
+    formatSignals,
+    toneSignals,
+    visualSignals,
+    audioSignals,
+    pacingSignals,
+    storySignals,
+  });
   return {
     id: capture.id,
     title: pickReferenceTitle(capture),
@@ -1383,16 +2106,16 @@ function toReferenceSummary(
     projectIds: capture.projectIds,
     createdAt: capture.createdAt,
     pagePath,
-    summary: analysis.summary,
-    themes: analysis.themes,
-    motifs: analysis.motifs,
-    creatorSignals: analysis.creatorSignals,
-    formatSignals: analysis.formatSignals,
-    toneSignals: analysis.toneSignals,
-    visualSignals: analysis.visualSignals,
-    audioSignals: analysis.audioSignals,
-    pacingSignals: analysis.pacingSignals,
-    storySignals: analysis.storySignals,
+    summary: surfaceSummary,
+    themes,
+    motifs,
+    creatorSignals,
+    formatSignals,
+    toneSignals,
+    visualSignals,
+    audioSignals,
+    pacingSignals,
+    storySignals,
     moments: analysis.moments,
     thumbnailLabel: capture.assets[0]?.originalName ?? capture.metadata.siteName ?? capture.platform,
     thumbnailAssetId: capture.assets[0]?.id ?? null,
@@ -1401,10 +2124,10 @@ function toReferenceSummary(
     relatedReferenceIds: [],
     bestUseCases: [],
     doNotCopy: [],
-    emotionalTone: analysis.toneSignals.slice(0, 3).map((tone) => tone.label),
+    emotionalTone: toneSignals.slice(0, 3).map((tone) => tone.label),
     openQuestions: buildReferenceOpenQuestions(capture, analysis),
-    contradictions: buildReferenceContradictions(analysis.themes),
-    transcriptSource: analysis.transcriptProvenance.source,
+    contradictions: buildReferenceContradictions(themes),
+    transcriptSource,
     provenance: {
       sourceIds: [capture.id],
       sourcePaths: [
@@ -1413,6 +2136,7 @@ function toReferenceSummary(
         capture.rawPaths.inbox,
         capture.rawPaths.artifacts.transcript,
         capture.rawPaths.artifacts.mediaAnalysis,
+        capture.rawPaths.artifacts.moments,
       ].filter((value): value is string => Boolean(value)),
       compiledAt,
       sourceHash: null,
@@ -2144,6 +2868,11 @@ function scoreReferenceSimilarity(
   const motifOverlap = intersectCount(left.motifs.map((tag) => tag.slug), right.motifs.map((tag) => tag.slug));
   const creatorOverlap = intersectCount(left.creatorSignals.map((tag) => tag.slug), right.creatorSignals.map((tag) => tag.slug));
   const formatOverlap = intersectCount(left.formatSignals.map((tag) => tag.slug), right.formatSignals.map((tag) => tag.slug));
+  const toneOverlap = intersectCount(left.toneSignals.map((tag) => tag.slug), right.toneSignals.map((tag) => tag.slug));
+  const storyOverlap = intersectCount(left.storySignals.map((tag) => tag.slug), right.storySignals.map((tag) => tag.slug));
+  const collectionBonus =
+    left.collection && right.collection && sanitizeFileName(left.collection) === sanitizeFileName(right.collection) ? 1.4 : 0;
+  const textOverlap = scoreTokenSetOverlap(buildReferenceSearchTokens(left), buildReferenceSearchTokens(right));
   const recencyTiebreaker = Math.max(0, 0.4 - referenceAgeDistance(left, right) / 120);
 
   return Number((
@@ -2152,6 +2881,10 @@ function scoreReferenceSimilarity(
     motifOverlap * 2.5 +
     creatorOverlap * 2 +
     formatOverlap * 1.5 +
+    toneOverlap * 1.35 +
+    storyOverlap * 1.35 +
+    textOverlap * 3.2 +
+    collectionBonus +
     recencyTiebreaker
   ).toFixed(3));
 }
@@ -2308,6 +3041,7 @@ function buildQueryIndexEntries(
       sourceIds: [reference.id],
       path: reference.pagePath,
     })),
+    ...buildMomentQueryEntries(root, references),
     ...catalysts.map((catalyst) => ({
       id: catalyst.id,
       kind: "catalyst" as const,
@@ -2389,6 +3123,45 @@ function buildCreativeSessionQueryEntry(session: CreativeSessionRecord): QueryIn
     sourceIds: session.referenceIds,
     path: `outputs/app/creative-sessions.json`,
   };
+}
+
+function buildMomentQueryEntries(root: string, references: ReferenceSummary[]): QueryIndexEntry[] {
+  const entries: QueryIndexEntry[] = [];
+  for (const reference of references) {
+    const artifact = readMomentsArtifact(root, reference.id);
+    if (!artifact?.moments.length) continue;
+    for (const moment of artifact.moments) {
+      // Only index moments that carry grounded signal (tags or timestamps)
+      if (moment.signalTags.length === 0 && moment.startMs == null) continue;
+      entries.push({
+        id: `moment:${moment.id}`,
+        kind: "moment",
+        title: moment.label,
+        summary: moment.summary,
+        tags: uniqueStrings([
+          ...moment.signalTags.map((slug) => `signal:${slug}`),
+          `source:${reference.sourceKind}`,
+          `platform:${sanitizeFileName(reference.platform)}`,
+          ...reference.themes.map((tag) => `theme:${tag.slug}`),
+          ...(moment.speaker ? [`speaker:${sanitizeFileName(moment.speaker)}`] : []),
+        ]),
+        handles: moment.speaker ? [moment.speaker] : [],
+        dates: {
+          createdAt: reference.createdAt,
+          updatedAt: reference.provenance.compiledAt,
+        },
+        sourceIds: [reference.id],
+        path: reference.pagePath,
+        momentId: moment.id,
+        momentKind: moment.kind,
+        momentStartMs: moment.startMs,
+        momentEndMs: moment.endMs,
+        momentSpeaker: moment.speaker,
+        momentAssetId: moment.assetId ?? null,
+      });
+    }
+  }
+  return entries;
 }
 
 function syncQueryIndex(root: string, references = readCompiledReferences(root)): QueryIndexEntry[] {
@@ -3425,16 +4198,13 @@ function matchQueryEntry(
 
   if (filters.q) {
     const needle = filters.q.toLowerCase();
-    const haystack = [
-      entry.title,
-      entry.summary,
-      entry.tags.join(" "),
-      entry.handles.join(" "),
-      ...sourceReferences.map((reference) => `${reference.title} ${reference.summary} ${reference.note}`),
-    ]
-      .join(" ")
-      .toLowerCase();
-    if (!haystack.includes(needle)) return false;
+    const haystack = buildQueryHaystack(entry, sourceReferences);
+    const tokens = tokenizeSearchText(filters.q);
+    if (!haystack.includes(needle)) {
+      const matches = tokens.filter((token) => haystack.includes(token));
+      const threshold = Math.max(1, Math.ceil(tokens.length * 0.4));
+      if (matches.length < threshold) return false;
+    }
   }
 
   return true;
@@ -3451,10 +4221,18 @@ function scoreQueryEntry(
   if (q) {
     const title = entry.title.toLowerCase();
     const summary = entry.summary.toLowerCase();
+    const tokens = tokenizeSearchText(q);
     if (title.includes(q)) score += 6;
     if (summary.includes(q)) score += 3;
     if (entry.tags.some((tag) => tag.includes(q))) score += 2;
     if (entry.handles.some((handle) => handle.toLowerCase().includes(q))) score += 2;
+    for (const token of tokens) {
+      if (title.includes(token)) score += 2.1;
+      if (summary.includes(token)) score += 1.3;
+      if (entry.tags.some((tag) => tag.includes(token))) score += 1.4;
+      if (entry.handles.some((handle) => handle.toLowerCase().includes(token))) score += 1.2;
+    }
+    score += scoreTokenSetOverlap(tokenizeSearchText(q), tokenizeSearchText(`${entry.title} ${entry.summary} ${entry.tags.join(" ")} ${entry.handles.join(" ")}`)) * 4;
   }
 
   const recency = entry.dates.updatedAt ?? entry.dates.createdAt ?? entry.dates.end ?? "";
@@ -3462,6 +4240,65 @@ function scoreQueryEntry(
     score += new Date(recency).getTime() / 1e13;
   }
   return score;
+}
+
+function buildQueryHaystack(entry: QueryIndexEntry, sourceReferences: ReferenceSummary[]): string {
+  return [
+    entry.title,
+    entry.summary,
+    entry.tags.join(" "),
+    entry.handles.join(" "),
+    ...sourceReferences.map((reference) => buildReferenceSearchText(reference)),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function buildReferenceSearchText(reference: ReferenceSummary): string {
+  return [
+    reference.title,
+    reference.summary,
+    reference.note,
+    reference.savedReason,
+    reference.collection,
+    reference.platform,
+    reference.openQuestions.join(" "),
+    reference.contradictions.join(" "),
+    reference.moments.map((moment) => `${moment.label} ${moment.description} ${moment.signalTags?.join(" ") ?? ""}`).join(" "),
+    reference.themes.flatMap((tag) => [tag.label, ...tag.evidence]).join(" "),
+    reference.motifs.flatMap((tag) => [tag.label, ...tag.evidence]).join(" "),
+    reference.creatorSignals.flatMap((tag) => [tag.label, ...tag.evidence]).join(" "),
+    reference.formatSignals.flatMap((tag) => [tag.label, ...tag.evidence]).join(" "),
+    reference.toneSignals.flatMap((tag) => [tag.label, ...tag.evidence]).join(" "),
+    reference.visualSignals.flatMap((tag) => [tag.label, ...tag.evidence]).join(" "),
+    reference.audioSignals.flatMap((tag) => [tag.label, ...tag.evidence]).join(" "),
+    reference.pacingSignals.flatMap((tag) => [tag.label, ...tag.evidence]).join(" "),
+    reference.storySignals.flatMap((tag) => [tag.label, ...tag.evidence]).join(" "),
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function buildReferenceSearchTokens(reference: ReferenceSummary): string[] {
+  return tokenizeSearchText(buildReferenceSearchText(reference));
+}
+
+function tokenizeSearchText(value: string): string[] {
+  return uniqueStrings(
+    value
+      .toLowerCase()
+      .split(/[^a-z0-9@._-]+/i)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 2 && !SEARCH_STOPWORDS.has(token)),
+  );
+}
+
+function scoreTokenSetOverlap(leftTokens: string[], rightTokens: string[]): number {
+  if (leftTokens.length === 0 || rightTokens.length === 0) return 0;
+  const right = new Set(rightTokens);
+  const overlap = leftTokens.filter((token) => right.has(token)).length;
+  return overlap / Math.max(1, Math.min(leftTokens.length, rightTokens.length));
 }
 
 function getQueryEntrySourceReferences(
@@ -3610,29 +4447,107 @@ function aggregateSignals(signals: SignalTag[]): SignalTag[] {
     }));
 }
 
+function stripSparseFallbackSignals(signals: SignalTag[]): SignalTag[] {
+  return signals.filter((signal) => !isSparseFallbackSignal(signal));
+}
+
+function isSparseFallbackSignal(signal: SignalTag): boolean {
+  return signal.evidence.length > 0
+    && signal.evidence.every((evidence) => normalizeGroundingText(evidence) === SPARSE_SIGNAL_EVIDENCE);
+}
+
+function surfaceReferenceSignals(
+  capture: CaptureRecord,
+  transcriptSource: AnalysisResult["transcriptProvenance"]["source"],
+  signals: SignalTag[],
+  category: "theme" | "motif" | "creator" | "format" | "tone" | "visual" | "audio" | "pacing" | "story",
+): SignalTag[] {
+  const surfaced = stripSparseFallbackSignals(signals);
+  if (!isTextLedCaptureWithoutMedia(capture, transcriptSource)) return surfaced;
+  if (category === "motif" || category === "visual" || category === "audio" || category === "pacing") {
+    return surfaced.filter((signal) => hasExplicitFormalEvidence(signal, category));
+  }
+  return surfaced;
+}
+
+function hasExplicitFormalEvidence(
+  signal: SignalTag,
+  category: "motif" | "visual" | "audio" | "pacing",
+): boolean {
+  const patterns = TEXT_LED_FORMAL_EVIDENCE_PATTERNS[category];
+  return signal.evidence.some((evidence) => patterns.some((pattern) => pattern.test(evidence)));
+}
+
+function isTextLedCaptureWithoutMedia(
+  capture: CaptureRecord,
+  transcriptSource: AnalysisResult["transcriptProvenance"]["source"],
+): boolean {
+  return capture.assets.length === 0
+    && (
+      transcriptSource === "capture-stitch"
+      || transcriptSource === "web-article"
+      || transcriptSource === "podcast-page"
+      || transcriptSource === "podcast-rss"
+    );
+}
+
 function buildCreatorPatterns(
   references: ReferenceSummary[],
   themes: SignalTag[],
   motifs: SignalTag[],
   creators: SignalTag[],
 ): TasteSnapshot["creatorPatterns"] {
-  const primaryTheme = themes[0]?.label ?? "a reflective thread";
-  const primaryMotif = motifs[0]?.label ?? "soft pacing";
-  const secondaryMotif = motifs[1]?.label ?? "textural imagery";
+  const materiality = summarizeSnapshotMateriality(references);
+  const primaryTheme = themes[0]?.label;
+  const primaryMotif = motifs[0]?.label;
+  const primaryFormat = materiality.formats[0]?.label;
+  const primaryStory = materiality.storySignals[0]?.label;
+  const primaryAudio = materiality.audioSignals[0]?.label;
   const primaryCreator = creators[0]?.label;
   const refs = references.slice(0, 3).map((reference) => reference.id);
-  const patterns = [
-    {
-      label: "Emotional orbit",
-      summary: `You keep circling ${primaryTheme.toLowerCase()} and presenting it through ${primaryMotif.toLowerCase()}.`,
+  const patterns: TasteSnapshot["creatorPatterns"] = [];
+
+  if (!primaryTheme && !primaryMotif && !primaryFormat && !primaryStory && !primaryAudio && !primaryCreator) {
+    return patterns;
+  }
+
+  if (materiality.textLedShare >= 0.5 && primaryTheme) {
+    patterns.push({
+      label: "Thinking loop",
+      summary: `More of the archive is arriving as written or spoken reflection than image-led reference material, usually circling ${primaryTheme.toLowerCase()}.`,
       sourceReferenceIds: refs,
-    },
-    {
+    });
+  } else if (primaryMotif) {
+    const themeLead = primaryTheme?.toLowerCase() ?? "the same emotional question";
+    patterns.push({
+      label: "Emotional orbit",
+      summary: `You keep circling ${themeLead} and presenting it through ${primaryMotif.toLowerCase()}.`,
+      sourceReferenceIds: refs,
+    });
+  } else {
+    const themeLead = primaryTheme?.toLowerCase() ?? "the same emotional question";
+    patterns.push({
+      label: "Emotional orbit",
+      summary: `The archive keeps returning to ${themeLead} even when the formal cues are still sparse.`,
+      sourceReferenceIds: refs,
+    });
+  }
+
+  if (primaryMotif) {
+    const secondaryMotif = motifs[1]?.label ?? primaryFormat ?? primaryAudio ?? primaryStory ?? "spoken structure";
+    patterns.push({
       label: "Craft rhythm",
       summary: `The archive leans toward ${primaryMotif.toLowerCase()} paired with ${secondaryMotif.toLowerCase()}.`,
       sourceReferenceIds: refs,
-    },
-  ];
+    });
+  } else if (primaryFormat || primaryStory) {
+    patterns.push({
+      label: "Form preference",
+      summary: `What keeps recurring is less a visual motif than a preference for ${[primaryFormat, primaryStory].filter(Boolean).map((value) => value!.toLowerCase()).join(" with ")}.`,
+      sourceReferenceIds: refs,
+    });
+  }
+
   if (primaryCreator) {
     patterns.push({
       label: "Creator pull",
@@ -3648,23 +4563,48 @@ function buildPromptSeeds(
   themes: SignalTag[],
   motifs: SignalTag[],
 ): TasteSnapshot["promptSeeds"] {
-  const theme = themes[0]?.label ?? "Private Voice";
-  const motif = motifs[0]?.label ?? "Soft Pacing";
+  const materiality = summarizeSnapshotMateriality(references);
+  const theme = themes[0]?.label;
+  const motif = motifs[0]?.label;
+  const format = materiality.formats[0]?.label ?? "Micro Essay";
+  const story = materiality.storySignals[0]?.label ?? "Observation";
   const refs = references.slice(0, 2).map((reference) => reference.id);
+  if (!theme && !motif && materiality.formats.length === 0 && materiality.storySignals.length === 0) {
+    return [];
+  }
+  if (materiality.textLedShare >= 0.5) {
+    return [
+      {
+        title: "Question to script",
+        prompt: `Start from one saved question in the archive and answer it with one concrete lived example. Keep the frame closer to ${story.toLowerCase()} than performance.`,
+        referenceIds: refs,
+      },
+      {
+        title: "Journal to script",
+        prompt: `Use this week's references to turn one reflective note into a ${format.toLowerCase()} that still sounds like you thinking in real time.`,
+        referenceIds: refs,
+      },
+      {
+        title: "Freelance translation",
+        prompt: `Translate the archive's pull toward ${(theme ?? "private thinking").toLowerCase()} into a client-safe concept that keeps the thinking legible without sounding generic.`,
+        referenceIds: refs,
+      },
+    ];
+  }
   return [
     {
       title: "Reel premise",
-      prompt: `Turn ${theme.toLowerCase()} into a short reel that uses ${motif.toLowerCase()} without feeling performative.`,
+      prompt: `Turn ${(theme ?? "one honest question").toLowerCase()} into a short reel${motif ? ` that uses ${motif.toLowerCase()}` : ""} without feeling performative.`,
       referenceIds: refs,
     },
     {
       title: "Journal to script",
-      prompt: `Use this week's references to transform one journal thought into a cinematic spoken script.`,
+      prompt: `Use this week's references to transform one journal thought into a ${format.toLowerCase()} with a clear emotional turn.`,
       referenceIds: refs,
     },
     {
       title: "Freelance translation",
-      prompt: `Translate your taste for ${theme.toLowerCase()} into a client-safe concept deck with clear visual beats.`,
+      prompt: `Translate your taste for ${(theme ?? "emotional clarity").toLowerCase()} into a client-safe concept deck with ${motif ? `${motif.toLowerCase()} and ` : ""}clear visual beats.`,
       referenceIds: refs,
     },
   ];
@@ -3679,10 +4619,114 @@ function summarizeSnapshot(
   if (references.length === 0) {
     return "No captures yet. Save a few references and Aftertaste will turn them into a readable taste snapshot.";
   }
-  const theme = themes[0]?.label ?? "Reflection";
-  const motif = motifs[0]?.label ?? "Soft Pacing";
+  const materiality = summarizeSnapshotMateriality(references);
+  const theme = themes[0]?.label;
   const secondTheme = themes[1]?.label ? ` with a secondary pull toward ${themes[1]!.label.toLowerCase()}` : "";
-  return `Lately your archive feels anchored in ${theme.toLowerCase()}${secondTheme}. The strongest craft move is ${motif.toLowerCase()}, and the references keep resolving into a tone that feels quiet, intimate, and deliberate. ${patterns[0]?.summary ?? ""}`;
+  if (!theme && motifs.length === 0) {
+    const format = materiality.formats[0]?.label?.toLowerCase() ?? "saved source material";
+    return `The archive is still too sparse to name a stable theme or craft move with confidence. Most of the usable signal is arriving through ${format}, and a sharper pattern will need either clearer notes or more corroborating references.`;
+  }
+  if (materiality.textLedShare >= 0.5 && theme) {
+    const format = materiality.formats[0]?.label?.toLowerCase() ?? "written reflection";
+    const story = materiality.storySignals[0]?.label?.toLowerCase() ?? "questions and observations";
+    return `Lately your archive feels anchored in ${theme.toLowerCase()}${secondTheme}. A lot of the material is arriving as ${format} rather than pure visual moodboarding, and the strongest repeated move is ${story}. ${patterns[0]?.summary ?? ""}`.trim();
+  }
+  const motif = motifs[0]?.label;
+  if (!motif) {
+    const format = materiality.formats[0]?.label?.toLowerCase() ?? "short-form thinking";
+    const themeLead = theme ? `anchored in ${theme.toLowerCase()}${secondTheme}` : "still looking for a stable emotional center";
+    return `Lately your archive feels ${themeLead}. The formal signal is still emerging, but the references keep resolving through ${format}. ${patterns[0]?.summary ?? ""}`.trim();
+  }
+  const themeLead = theme ? `anchored in ${theme.toLowerCase()}${secondTheme}` : "driven more by craft than by one named emotional theme";
+  return `Lately your archive feels ${themeLead}. The strongest craft move is ${motif.toLowerCase()}, and the references keep resolving into a tone that feels quiet, intimate, and deliberate. ${patterns[0]?.summary ?? ""}`;
+}
+
+function summarizeSnapshotMateriality(references: ReferenceSummary[]): {
+  textLedShare: number;
+  formats: SignalTag[];
+  storySignals: SignalTag[];
+  audioSignals: SignalTag[];
+} {
+  const textLedCount = references.filter((reference) =>
+    reference.assetCount === 0
+    && (reference.transcriptSource === "web-article" || reference.transcriptSource === "podcast-page" || reference.transcriptSource === "podcast-rss")
+  ).length;
+  return {
+    textLedShare: references.length > 0 ? textLedCount / references.length : 0,
+    formats: aggregateSignals(references.flatMap((reference) => reference.formatSignals)),
+    storySignals: aggregateSignals(references.flatMap((reference) => reference.storySignals)),
+    audioSignals: aggregateSignals(references.flatMap((reference) => reference.audioSignals)),
+  };
+}
+
+async function refineSnapshotIntelligence(root: string): Promise<TasteSnapshot> {
+  const paths = getAftertastePaths(root);
+  const baseSnapshot = withSnapshotDefaults(readJson<TasteSnapshot>(paths.snapshotJson));
+  const references = readCompiledReferences(root);
+  if (references.length === 0) return baseSnapshot;
+
+  const sourceHash = buildSnapshotIntelligenceHash(baseSnapshot, references);
+  if (baseSnapshot.provenance.sourceHash === sourceHash) {
+    return baseSnapshot;
+  }
+
+  const intelligence = await synthesizeSnapshotIntelligence({
+    snapshot: baseSnapshot,
+    references,
+    antiSignals: baseSnapshot.antiSignals.length > 0 ? baseSnapshot.antiSignals : readNotMeBullets(root),
+  });
+  if (!intelligence) return baseSnapshot;
+
+  const refined = withSnapshotDefaults({
+    ...baseSnapshot,
+    summary: intelligence.summary || baseSnapshot.summary,
+    creatorPatterns: intelligence.creatorPatterns.length > 0 ? intelligence.creatorPatterns : baseSnapshot.creatorPatterns,
+    promptSeeds: intelligence.promptSeeds.length > 0 ? intelligence.promptSeeds : baseSnapshot.promptSeeds,
+    tensions: intelligence.tensions.length > 0 ? intelligence.tensions : baseSnapshot.tensions,
+    openQuestions: intelligence.openQuestions.length > 0 ? intelligence.openQuestions : baseSnapshot.openQuestions,
+    provenance: {
+      ...baseSnapshot.provenance,
+      sourceHash,
+    },
+  });
+
+  writeConceptPages(root, references, refined);
+  writeJson(paths.referencesJson, references);
+  writeJson(paths.snapshotJson, refined);
+  writeText(path.join(paths.wikiSnapshotsDir, "current.md"), buildSnapshotPage(refined));
+  writeText(path.join(paths.wikiSnapshotsDir, `${refined.id}.md`), buildSnapshotPage(refined));
+  writeText(paths.wikiStyleConstitution, buildStyleConstitutionPage(references));
+  writeText(paths.wikiNotMe, buildNotMePage(references));
+  writeText(paths.wikiIndex, buildIndexPage(references, refined));
+
+  const catalysts = compileCatalysts(root, references, refined);
+  compileQueryIndex(root, references, catalysts, refined);
+  compileTasteGraph(root, references, catalysts, refined);
+
+  return refined;
+}
+
+function buildSnapshotIntelligenceHash(snapshot: TasteSnapshot, references: ReferenceSummary[]): string {
+  return hashValue({
+    snapshotId: snapshot.id,
+    window: snapshot.window,
+    antiSignals: snapshot.antiSignals,
+    references: references.map((reference) => ({
+      id: reference.id,
+      title: reference.title,
+      summary: reference.summary,
+      note: reference.note,
+      savedReason: reference.savedReason,
+      collection: reference.collection,
+      themes: reference.themes.map((signal) => signal.slug),
+      motifs: reference.motifs.map((signal) => signal.slug),
+      creators: reference.creatorSignals.map((signal) => signal.slug),
+      formats: reference.formatSignals.map((signal) => signal.slug),
+      story: reference.storySignals.map((signal) => signal.slug),
+      contradictions: reference.contradictions,
+      openQuestions: reference.openQuestions,
+    })),
+  }).slice(0, 24);
 }
 
 function buildSnapshotPage(snapshot: TasteSnapshot): string {
@@ -3847,21 +4891,44 @@ function matchReference(
   if (filters.platform && sanitizeFileName(reference.platform) !== filters.platform) return false;
   if (filters.q) {
     const needle = filters.q.toLowerCase();
-    const haystack = [
-      reference.title,
-      reference.summary,
-      reference.note,
-      reference.platform,
-      ...reference.themes.map((theme) => theme.label),
-      ...reference.motifs.map((motif) => motif.label),
-      ...reference.creatorSignals.map((creator) => creator.label),
-      ...reference.formatSignals.map((format) => format.label),
-    ]
-      .join(" ")
-      .toLowerCase();
-    if (!haystack.includes(needle)) return false;
+    const haystack = buildReferenceSearchText(reference).toLowerCase();
+    const tokens = tokenizeSearchText(filters.q);
+    if (!haystack.includes(needle)) {
+      const matches = tokens.filter((token) => haystack.includes(token));
+      const threshold = Math.max(1, Math.ceil(tokens.length * 0.4));
+      if (matches.length < threshold) return false;
+    }
   }
   return true;
+}
+
+function scoreReferenceMatch(
+  reference: ReferenceSummary,
+  filters?: {
+    q?: string;
+  },
+): number {
+  let score = 0;
+  const q = filters?.q?.trim().toLowerCase();
+  if (q) {
+    const title = reference.title.toLowerCase();
+    const summary = reference.summary.toLowerCase();
+    const searchText = buildReferenceSearchText(reference).toLowerCase();
+    const tokens = tokenizeSearchText(q);
+    if (title.includes(q)) score += 7;
+    if (summary.includes(q)) score += 4;
+    if (searchText.includes(q)) score += 2.5;
+    for (const token of tokens) {
+      if (title.includes(token)) score += 2.25;
+      if (summary.includes(token)) score += 1.5;
+      if (searchText.includes(token)) score += 1.1;
+    }
+    score += scoreTokenSetOverlap(tokenizeSearchText(q), buildReferenceSearchTokens(reference)) * 4.5;
+  }
+  if (reference.createdAt) {
+    score += new Date(reference.createdAt).getTime() / 1e13;
+  }
+  return score;
 }
 
 function buildFilters(references: ReferenceSummary[]): ReferencesFilters {
@@ -3877,6 +4944,7 @@ function buildFilters(references: ReferenceSummary[]): ReferencesFilters {
 function countFilters(tags: SignalTag[]): ReferencesFilters["themes"] {
   const counts = new Map<string, { slug: string; label: string; count: number }>();
   for (const tag of tags) {
+    if (isSparseFallbackSignal(tag)) continue;
     const current = counts.get(tag.slug) ?? { slug: tag.slug, label: tag.label, count: 0 };
     current.count += 1;
     counts.set(tag.slug, current);
@@ -3978,6 +5046,28 @@ export function buildIdeaGenerationContext(
     }
   }
 
+  const momentExcerpts: Record<string, ReferenceMoment[]> = {};
+  for (const ref of input.selectedReferences) {
+    const artifact = readMomentsArtifact(root, ref.id);
+    if (!artifact?.moments.length) continue;
+    const grounded = artifact.moments
+      .filter((m) => m.signalTags.length > 0 || m.startMs != null)
+      .map((m) => ({
+        id: m.id,
+        kind: m.kind,
+        label: m.label,
+        description: m.summary,
+        startMs: m.startMs,
+        endMs: m.endMs,
+        speaker: m.speaker,
+        signalTags: m.signalTags,
+      }))
+      .slice(0, 4);
+    if (grounded.length > 0) {
+      momentExcerpts[ref.id] = grounded;
+    }
+  }
+
   return {
     budget: "L2",
     outputType: input.outputType,
@@ -3990,6 +5080,7 @@ export function buildIdeaGenerationContext(
     constitutionExcerpt: readTextExcerpt(getAftertastePaths(root).wikiStyleConstitution, 1200),
     notMeExcerpt: readTextExcerpt(getAftertastePaths(root).wikiNotMe, 800),
     transcriptExcerpts,
+    momentExcerpts,
     wikiArticles: wikiArticles.map((article) => ({
       path: article.path,
       title: article.title,
@@ -4362,6 +5453,12 @@ function readMediaAnalysisArtifact(root: string, captureId: string): MediaAnalys
   });
 }
 
+function readMomentsArtifact(root: string, captureId: string): CaptureMomentsArtifact | null {
+  const filePath = getMomentsArtifactPath(root, captureId);
+  if (!fs.existsSync(filePath)) return null;
+  return readJson<CaptureMomentsArtifact>(filePath);
+}
+
 async function ensureTranscriptArtifact(root: string, capture: CaptureRecord): Promise<TranscriptArtifact> {
   const existing = readTranscriptArtifact(root, capture.id);
   if (existing) {
@@ -4382,10 +5479,8 @@ async function ensureTranscriptArtifact(root: string, capture: CaptureRecord): P
     }
   }
 
-  const artifact = await resolveTranscriptArtifact(root, capture);
-  const filePath = getTranscriptArtifactPath(root, capture.id);
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  writeJson(filePath, artifact);
+  const artifact = finalizeTranscriptArtifact(capture, await resolveTranscriptArtifact(root, capture), existing);
+  persistTranscriptArtifact(root, capture.id, artifact, existing);
   return artifact;
 }
 
@@ -4410,13 +5505,17 @@ async function ensureMediaAnalysisArtifact(
     }
   }
 
-  const artifact = await resolveMediaAnalysisWithAdapter({
+  const artifact = finalizeMediaAnalysisArtifact(
     capture,
     transcriptArtifact,
-  });
-  const filePath = getMediaAnalysisArtifactPath(root, capture.id);
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  writeJson(filePath, artifact);
+    await resolveMediaAnalysisWithAdapter({
+      root,
+      capture,
+      transcriptArtifact,
+    }),
+    existing,
+  );
+  persistMediaAnalysisArtifact(root, capture.id, artifact, existing);
   return artifact;
 }
 
@@ -4426,6 +5525,216 @@ function getTranscriptArtifactPath(root: string, captureId: string): string {
 
 function getMediaAnalysisArtifactPath(root: string, captureId: string): string {
   return path.join(getAftertastePaths(root).rawMediaDir, captureId, "media-analysis.json");
+}
+
+function getMomentsArtifactPath(root: string, captureId: string): string {
+  return path.join(getAftertastePaths(root).rawMediaDir, captureId, "moments.json");
+}
+
+function getTranscriptArtifactHistoryDir(root: string, captureId: string): string {
+  return path.join(getAftertastePaths(root).rawMediaDir, captureId, "history", "transcript");
+}
+
+function getMediaAnalysisArtifactHistoryDir(root: string, captureId: string): string {
+  return path.join(getAftertastePaths(root).rawMediaDir, captureId, "history", "media-analysis");
+}
+
+function finalizeTranscriptArtifact(
+  capture: CaptureRecord,
+  artifact: TranscriptArtifact,
+  previous: TranscriptArtifact | null,
+): TranscriptArtifact {
+  const provider = buildTranscriptArtifactProviderReceipt(artifact);
+  const inputFingerprint = hashValue({
+    source: artifact.source,
+    sourceUrl: capture.sourceUrl,
+    sourceKind: capture.sourceKind,
+    note: capture.note,
+    savedReason: capture.savedReason,
+    acquisition: capture.acquisition
+      ? {
+          mode: capture.acquisition.mode,
+          provider: capture.acquisition.provider,
+          status: capture.acquisition.status,
+        }
+      : null,
+    assets: capture.assets.map((asset) => ({
+      id: asset.id,
+      kind: asset.kind,
+      fileName: asset.fileName,
+      mediaType: asset.mediaType,
+      size: asset.size,
+    })),
+    metadata: {
+      title: capture.metadata.title,
+      description: capture.metadata.description,
+      canonicalUrl: capture.metadata.canonicalUrl,
+      siteName: capture.metadata.siteName,
+    },
+  }).slice(0, 24);
+
+  return {
+    ...artifact,
+    generation: {
+      id: makeArtifactGenerationId("trn", artifact.generatedAt, provider, inputFingerprint),
+      schemaVersion: TRANSCRIPT_ARTIFACT_SCHEMA_VERSION,
+      inputFingerprint,
+      supersedesGenerationId: previous?.generation?.id ?? null,
+      provider,
+    },
+  };
+}
+
+function finalizeMediaAnalysisArtifact(
+  capture: CaptureRecord,
+  transcriptArtifact: TranscriptArtifact,
+  artifact: MediaAnalysisArtifact,
+  previous: MediaAnalysisArtifact | null,
+): MediaAnalysisArtifact {
+  const provider = buildMediaAnalysisArtifactProviderReceipt(artifact);
+  const inputFingerprint = hashValue({
+    source: artifact.source,
+    sourceUrl: capture.sourceUrl,
+    sourceKind: capture.sourceKind,
+    note: capture.note,
+    savedReason: capture.savedReason,
+    acquisition: capture.acquisition
+      ? {
+          mode: capture.acquisition.mode,
+          provider: capture.acquisition.provider,
+          status: capture.acquisition.status,
+        }
+      : null,
+    assets: capture.assets.map((asset) => ({
+      id: asset.id,
+      kind: asset.kind,
+      fileName: asset.fileName,
+      mediaType: asset.mediaType,
+      size: asset.size,
+    })),
+    transcript: {
+      generationId: transcriptArtifact.generation?.id ?? null,
+      source: transcriptArtifact.source,
+      textHash: hashValue(transcriptArtifact.text).slice(0, 24),
+    },
+  }).slice(0, 24);
+
+  return {
+    ...artifact,
+    generation: {
+      id: makeArtifactGenerationId("mda", artifact.generatedAt, provider, inputFingerprint),
+      schemaVersion: MEDIA_ANALYSIS_ARTIFACT_SCHEMA_VERSION,
+      inputFingerprint,
+      supersedesGenerationId: previous?.generation?.id ?? null,
+      provider,
+    },
+  };
+}
+
+function persistTranscriptArtifact(
+  root: string,
+  captureId: string,
+  artifact: TranscriptArtifact,
+  previous: TranscriptArtifact | null,
+): void {
+  persistArtifactWithHistory(
+    getTranscriptArtifactPath(root, captureId),
+    getTranscriptArtifactHistoryDir(root, captureId),
+    artifact,
+    previous,
+  );
+}
+
+function persistMediaAnalysisArtifact(
+  root: string,
+  captureId: string,
+  artifact: MediaAnalysisArtifact,
+  previous: MediaAnalysisArtifact | null,
+): void {
+  persistArtifactWithHistory(
+    getMediaAnalysisArtifactPath(root, captureId),
+    getMediaAnalysisArtifactHistoryDir(root, captureId),
+    artifact,
+    previous,
+  );
+}
+
+function persistArtifactWithHistory<T extends { generation?: ArtifactGenerationMetadata }>(
+  currentPath: string,
+  historyDir: string,
+  artifact: T,
+  previous: T | null,
+): void {
+  fs.mkdirSync(path.dirname(currentPath), { recursive: true });
+  fs.mkdirSync(historyDir, { recursive: true });
+
+  if (previous?.generation?.id) {
+    const previousHistoryPath = path.join(historyDir, `${previous.generation.id}.json`);
+    if (!fs.existsSync(previousHistoryPath)) {
+      writeJson(previousHistoryPath, previous);
+    }
+  }
+
+  if (artifact.generation?.id) {
+    writeJson(path.join(historyDir, `${artifact.generation.id}.json`), artifact);
+  }
+  writeJson(currentPath, artifact);
+}
+
+function buildTranscriptArtifactProviderReceipt(artifact: TranscriptArtifact): ArtifactProviderReceipt {
+  switch (artifact.source) {
+    case "audio-upload":
+      return getConfiguredTranscriptionProviderReceipt() ?? {
+        id: "openai",
+        model: process.env.AFTERTASTE_OPENAI_TRANSCRIPTION_MODEL ?? "whisper-1",
+        receiptId: null,
+      };
+    case "youtube":
+      return { id: "youtube-caption-track", model: null, receiptId: null };
+    case "podcast-page":
+      return { id: "podcast-page-extractor", model: null, receiptId: null };
+    case "podcast-rss":
+      return { id: "podcast-rss-extractor", model: null, receiptId: null };
+    case "web-article":
+      return { id: "web-article-extractor", model: null, receiptId: null };
+    case "manual":
+      return { id: "manual", model: null, receiptId: null };
+    case "capture-stitch":
+      return { id: "aftertaste", model: "capture-stitch-v1", receiptId: null };
+    default:
+      return { id: artifact.source, model: null, receiptId: null };
+  }
+}
+
+function buildMediaAnalysisArtifactProviderReceipt(artifact: MediaAnalysisArtifact): ArtifactProviderReceipt {
+  switch (artifact.source) {
+    case "heuristic":
+      return { id: "aftertaste", model: "heuristic-media-v1", receiptId: null };
+    case "gemini":
+      return { id: "gemini", model: null, receiptId: null };
+    case "twelve-labs":
+      return { id: "twelve-labs", model: null, receiptId: null };
+    case "rekognition":
+      return { id: "rekognition", model: null, receiptId: null };
+    case "manual":
+      return { id: "manual", model: null, receiptId: null };
+    default:
+      return { id: artifact.source, model: null, receiptId: null };
+  }
+}
+
+function makeArtifactGenerationId(
+  prefix: "trn" | "mda",
+  generatedAt: string,
+  provider: ArtifactProviderReceipt,
+  inputFingerprint: string,
+): string {
+  return `${prefix}_${hashValue({
+    generatedAt,
+    providerId: provider.id,
+    providerModel: provider.model,
+    inputFingerprint,
+  }).slice(0, 16)}`;
 }
 
 function buildFallbackTranscriptArtifact(capture: CaptureRecord): TranscriptArtifact {
@@ -4472,6 +5781,9 @@ async function resolveTranscriptArtifact(root: string, capture: CaptureRecord): 
   if (isYouTubeSourceUrl(capture.sourceUrl)) {
     return tryYouTubeTranscriptArtifact(capture);
   }
+
+  const redditArtifact = await tryRedditTranscriptArtifact(capture);
+  if (redditArtifact) return redditArtifact;
 
   // Substack: hit the REST API directly for reliable article body extraction.
   // The API returns clean JSON with body_html, sidestepping Substack's dynamic
@@ -4558,16 +5870,149 @@ async function tryAudioUploadTranscriptArtifact(root: string, capture: CaptureRe
       text: result.text,
       segments: result.segments,
       language: result.language,
-      notes: ["Transcript generated from uploaded audio via OpenAI Whisper."],
+      notes: [`Transcript generated from uploaded audio via ${result.providerLabel}.`],
     });
   } catch (error) {
     return buildErrorTranscriptArtifact(capture, "audio-upload", error instanceof Error ? error.message : String(error));
   }
 }
 
+function isRedditUrl(sourceUrl: string): boolean {
+  try {
+    const host = new URL(sourceUrl).hostname.replace(/^www\./, "");
+    return host === "reddit.com" || host.endsWith(".reddit.com");
+  } catch {
+    return false;
+  }
+}
+
 function isYouTubeSourceUrl(sourceUrl: string): boolean {
   const host = new URL(sourceUrl).hostname.replace(/^www\./, "");
   return host.includes("youtube") || host === "youtu.be";
+}
+
+function buildRedditJsonUrl(sourceUrl: string): string | null {
+  try {
+    const parsed = new URL(sourceUrl);
+    const pathName = parsed.pathname.endsWith("/") ? parsed.pathname.slice(0, -1) : parsed.pathname;
+    parsed.pathname = `${pathName}.json`;
+    if (!parsed.searchParams.has("raw_json")) parsed.searchParams.set("raw_json", "1");
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchRedditThreadJson(sourceUrl: string): Promise<unknown | null> {
+  const jsonUrl = buildRedditJsonUrl(sourceUrl);
+  if (!jsonUrl) return null;
+
+  const response = await fetch(jsonUrl, {
+    redirect: "follow",
+    signal: AbortSignal.timeout(5000),
+    headers: {
+      "user-agent": "Aftertaste/0.1 (+local-first)",
+      accept: "application/json,text/plain,*/*",
+    },
+  });
+  if (!response.ok) return null;
+  return response.json();
+}
+
+function readRedditPostData(payload: unknown): Record<string, unknown> | null {
+  if (!Array.isArray(payload)) return null;
+  const listings = payload as Array<{ data?: { children?: Array<{ data?: Record<string, unknown> }> } }>;
+  return listings[0]?.data?.children?.[0]?.data ?? null;
+}
+
+function readRedditCommentBodies(payload: unknown): string[] {
+  if (!Array.isArray(payload)) return [];
+  const listings = payload as Array<{ data?: { children?: Array<{ kind?: string; data?: Record<string, unknown> }> } }>;
+  const children = listings[1]?.data?.children ?? [];
+  return children
+    .filter((child) => child?.kind === "t1" && child.data)
+    .map((child) => normalizeTranscriptText(String(child.data?.body ?? "")))
+    .filter((body) => body.length >= 40)
+    .slice(0, 8);
+}
+
+function extractRedditMetadata(payload: unknown): UrlMetadata | null {
+  const post = readRedditPostData(payload);
+  if (!post) return null;
+
+  const title = typeof post.title === "string" ? decodeEntities(post.title) : null;
+  const selftext = typeof post.selftext === "string" ? normalizeTranscriptText(post.selftext) : "";
+  const subreddit = typeof post.subreddit === "string" ? post.subreddit : null;
+  const permalink = typeof post.permalink === "string" ? post.permalink : null;
+  const canonicalUrl = permalink ? `https://www.reddit.com${permalink}` : null;
+
+  return {
+    title,
+    description: truncateInline(selftext, 280) || (subreddit ? `Reddit discussion from r/${subreddit}` : null),
+    canonicalUrl,
+    siteName: "Reddit",
+    fetchedAt: new Date().toISOString(),
+    status: "ok",
+  };
+}
+
+function extractRedditThreadText(payload: unknown): string | null {
+  const post = readRedditPostData(payload);
+  if (!post) return null;
+
+  const title = typeof post.title === "string" ? normalizeTranscriptText(post.title) : "";
+  const selftext = typeof post.selftext === "string" ? normalizeTranscriptText(post.selftext) : "";
+  const subreddit = typeof post.subreddit === "string" ? post.subreddit : "";
+  const comments = readRedditCommentBodies(payload);
+  const combined = [
+    title ? `Reddit thread title: ${title}` : "",
+    subreddit ? `Subreddit: r/${subreddit}` : "",
+    selftext ? `Post body: ${selftext}` : "",
+    comments.length > 0 ? `Top comments: ${comments.join(" ")}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return combined.length >= 120 ? combined : null;
+}
+
+async function tryFetchRedditMetadata(sourceUrl: string): Promise<UrlMetadata | null> {
+  try {
+    const payload = await fetchRedditThreadJson(sourceUrl);
+    if (!payload) return null;
+    return extractRedditMetadata(payload);
+  } catch {
+    return null;
+  }
+}
+
+async function tryRedditTranscriptArtifact(capture: CaptureRecord): Promise<TranscriptArtifact | null> {
+  if (!isRedditUrl(capture.sourceUrl)) return null;
+  try {
+    const payload = await fetchRedditThreadJson(capture.sourceUrl);
+    if (!payload) {
+      return buildUnavailableTranscriptArtifact(capture, [
+        "Reddit thread JSON could not be fetched from the source URL.",
+      ]);
+    }
+
+    const text = extractRedditThreadText(payload);
+    if (!text) {
+      return buildUnavailableTranscriptArtifact(capture, [
+        "Reddit thread JSON was fetched, but it did not contain enough post or comment text to analyze.",
+      ]);
+    }
+
+    return buildResolvedTranscriptArtifact(capture, {
+      source: "web-article",
+      text,
+      segments: [],
+      language: null,
+      notes: ["Thread text extracted from Reddit's JSON endpoint during analyze."],
+    });
+  } catch (error) {
+    return buildErrorTranscriptArtifact(capture, "web-article", error instanceof Error ? error.message : String(error));
+  }
 }
 
 async function tryYouTubeTranscriptArtifact(capture: CaptureRecord): Promise<TranscriptArtifact> {
@@ -5118,7 +6563,7 @@ function buildUnavailableTranscriptArtifact(capture: CaptureRecord, notes: strin
 
 function buildErrorTranscriptArtifact(
   capture: CaptureRecord,
-  source: "youtube" | "podcast-page" | "podcast-rss" | "audio-upload",
+  source: "youtube" | "podcast-page" | "podcast-rss" | "audio-upload" | "web-article",
   error: string,
 ): TranscriptArtifact {
   const fallback = buildFallbackTranscriptArtifact(capture);
@@ -5156,22 +6601,35 @@ function clearManagedJson(dir: string): void {
 }
 
 function withCaptureDefaults(capture: CaptureRecord): CaptureRecord {
-  const derivedAcquisition = deriveCaptureAcquisition(capture.sourceUrl, capture.assets ?? [], capture.createdAt);
+  const derivedAcquisitionState = deriveInitialCaptureAcquisitionState(
+    capture.sourceUrl,
+    capture.assets ?? [],
+    capture.createdAt,
+    capture.metadata?.status ?? "skipped",
+  );
+  const acquisitionAttempts = mergeAcquisitionAttempts(
+    derivedAcquisitionState.attempts,
+    capture.acquisitionAttempts ?? [],
+  );
+  const acquisitionSummary = summarizeCaptureAcquisition(acquisitionAttempts);
+  const acquisition = capture.acquisition
+    ? {
+        ...acquisitionSummary,
+        ...capture.acquisition,
+        notes: capture.acquisition.notes ?? acquisitionSummary.notes,
+        sourceUrl: capture.acquisition.sourceUrl ?? acquisitionSummary.sourceUrl,
+        acquiredAt: capture.acquisition.acquiredAt ?? acquisitionSummary.acquiredAt,
+      }
+    : acquisitionSummary;
   return {
     ...capture,
     sourceKind: capture.sourceKind ?? "reference",
     savedReason: capture.savedReason ?? (capture.note.trim() || null),
     collection: capture.collection ?? null,
     projectIds: capture.projectIds ?? [],
-    acquisition: capture.acquisition
-      ? {
-          ...derivedAcquisition,
-          ...capture.acquisition,
-          notes: capture.acquisition.notes ?? derivedAcquisition.notes,
-          sourceUrl: capture.acquisition.sourceUrl ?? derivedAcquisition.sourceUrl,
-          acquiredAt: capture.acquisition.acquiredAt ?? derivedAcquisition.acquiredAt,
-        }
-      : derivedAcquisition,
+    acquisition,
+    acquisitionCoverage: capture.acquisitionCoverage ?? determineAcquisitionCoverage(acquisitionAttempts, capture.metadata?.status ?? "skipped"),
+    acquisitionAttempts,
     rawPaths: {
       inbox: capture.rawPaths?.inbox ?? "",
       capture: capture.rawPaths?.capture ?? "",
@@ -5181,6 +6639,7 @@ function withCaptureDefaults(capture: CaptureRecord): CaptureRecord {
       artifacts: {
         transcript: capture.rawPaths?.artifacts?.transcript ?? null,
         mediaAnalysis: capture.rawPaths?.artifacts?.mediaAnalysis ?? null,
+        moments: capture.rawPaths?.artifacts?.moments ?? null,
       },
     },
   };
@@ -5218,6 +6677,15 @@ function withTranscriptArtifactDefaults(
     };
   },
 ): TranscriptArtifact {
+  const provider = artifact.generation?.provider ?? buildTranscriptArtifactProviderReceipt(artifact);
+  const inputFingerprint = artifact.generation?.inputFingerprint
+    ?? hashValue({
+      source: artifact.source ?? "capture-stitch",
+      text: artifact.text ?? "",
+      sourceUrl: artifact.provenance?.sourceUrl ?? fallback.sourceUrl,
+      assetIds: artifact.provenance?.assetIds ?? fallback.assetIds,
+    }).slice(0, 24);
+  const generatedAt = artifact.generatedAt ?? new Date(0).toISOString();
   return {
     ...artifact,
     captureId: artifact.captureId ?? fallback.captureId,
@@ -5226,7 +6694,14 @@ function withTranscriptArtifactDefaults(
     text: artifact.text ?? "",
     segments: artifact.segments ?? [],
     language: artifact.language ?? null,
-    generatedAt: artifact.generatedAt ?? new Date(0).toISOString(),
+    generatedAt,
+    generation: {
+      id: artifact.generation?.id ?? makeArtifactGenerationId("trn", generatedAt, provider, inputFingerprint),
+      schemaVersion: artifact.generation?.schemaVersion ?? TRANSCRIPT_ARTIFACT_SCHEMA_VERSION,
+      inputFingerprint,
+      supersedesGenerationId: artifact.generation?.supersedesGenerationId ?? null,
+      provider,
+    },
     provenance: {
       sourceUrl: artifact.provenance?.sourceUrl ?? fallback.sourceUrl,
       sourceKind: artifact.provenance?.sourceKind ?? fallback.sourceKind,
@@ -5247,6 +6722,17 @@ function withMediaAnalysisArtifactDefaults(
     };
   },
 ): MediaAnalysisArtifact {
+  const provider = artifact.generation?.provider ?? buildMediaAnalysisArtifactProviderReceipt(artifact);
+  const inputFingerprint = artifact.generation?.inputFingerprint
+    ?? hashValue({
+      source: artifact.source ?? "heuristic",
+      summary: artifact.summary ?? "",
+      visualSignals: artifact.visualSignals ?? [],
+      audioSignals: artifact.audioSignals ?? [],
+      storySignals: artifact.storySignals ?? [],
+      acquisition: artifact.acquisition ?? fallback.acquisition ?? null,
+    }).slice(0, 24);
+  const generatedAt = artifact.generatedAt ?? new Date(0).toISOString();
   return {
     ...artifact,
     captureId: artifact.captureId ?? fallback.captureId,
@@ -5257,7 +6743,14 @@ function withMediaAnalysisArtifactDefaults(
     audioSignals: artifact.audioSignals ?? [],
     storySignals: artifact.storySignals ?? [],
     moments: artifact.moments ?? [],
-    generatedAt: artifact.generatedAt ?? new Date(0).toISOString(),
+    generatedAt,
+    generation: {
+      id: artifact.generation?.id ?? makeArtifactGenerationId("mda", generatedAt, provider, inputFingerprint),
+      schemaVersion: artifact.generation?.schemaVersion ?? MEDIA_ANALYSIS_ARTIFACT_SCHEMA_VERSION,
+      inputFingerprint,
+      supersedesGenerationId: artifact.generation?.supersedesGenerationId ?? null,
+      provider,
+    },
     acquisition: artifact.acquisition ?? fallback.acquisition,
     notes: artifact.notes ?? [],
   };
@@ -5354,7 +6847,21 @@ function writeIfMissing(filePath: string, content: string): void {
 
 function writeText(filePath: string, content: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, content, "utf-8");
+  const tempPath = path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
+  );
+  try {
+    fs.writeFileSync(tempPath, content, "utf-8");
+    fs.renameSync(tempPath, filePath);
+  } catch (error) {
+    try {
+      fs.rmSync(tempPath, { force: true });
+    } catch {
+      // Preserve the original write failure if temp cleanup also fails.
+    }
+    throw error;
+  }
 }
 
 function writeJson(filePath: string, value: unknown): void {
@@ -5363,6 +6870,10 @@ function writeJson(filePath: string, value: unknown): void {
 
 function readJson<T>(filePath: string): T {
   return JSON.parse(fs.readFileSync(filePath, "utf-8")) as T;
+}
+
+function hashValue(value: unknown): string {
+  return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
 function toRel(root: string, fullPath: string): string {

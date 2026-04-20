@@ -20,3 +20,4 @@ web/dist/
 .DS_Store
 obsidian-releases/
 local-vault/
+.gstack/

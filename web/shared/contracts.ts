@@ -36,6 +36,17 @@ export type CaptureAcquisitionStatus =
   | "unavailable"
   | "error";
 
+export type CaptureAcquisitionTarget =
+  | "source-pointer"
+  | "transcript-text"
+  | "media-bytes";
+
+export type CaptureAcquisitionCoverage =
+  | "url-only"
+  | "metadata-only"
+  | "transcript-backed"
+  | "byte-backed";
+
 export type CaptureAcquisitionProvider =
   | "meta"
   | "apify"
@@ -52,6 +63,14 @@ export type MediaAnalysisArtifactSource =
   | "rekognition"
   | "heuristic";
 
+export type CaptureMomentKind =
+  | "transcript-segment"
+  | "visual-beat"
+  | "audio-beat"
+  | "story-beat"
+  | "anchor-line"
+  | "asset-beat";
+
 export type QueryIndexKind =
   | "reference"
   | "catalyst"
@@ -60,7 +79,8 @@ export type QueryIndexKind =
   | "constitution"
   | "not-me"
   | "brief"
-  | "creative-session";
+  | "creative-session"
+  | "moment";
 
 export type TasteGraphNodeKind =
   | "reference"
@@ -158,6 +178,20 @@ export interface TranscriptSegment {
   speaker?: string;
 }
 
+export interface ArtifactProviderReceipt {
+  id: string;
+  model: string | null;
+  receiptId?: string | null;
+}
+
+export interface ArtifactGenerationMetadata {
+  id: string;
+  schemaVersion: number;
+  inputFingerprint: string;
+  supersedesGenerationId?: string | null;
+  provider: ArtifactProviderReceipt;
+}
+
 export interface TranscriptArtifactProvenance {
   sourceUrl: string;
   sourceKind: SourceKind;
@@ -177,6 +211,7 @@ export interface TranscriptArtifact {
   segments?: TranscriptSegment[];
   language?: string | null;
   generatedAt: string;
+  generation?: ArtifactGenerationMetadata;
   provenance: TranscriptArtifactProvenance;
   error?: string;
 }
@@ -189,6 +224,12 @@ export interface CaptureAcquisitionRecord {
   sourceUrl: string | null;
   notes: string[];
   error?: string;
+}
+
+export interface CaptureAcquisitionAttemptRecord extends CaptureAcquisitionRecord {
+  id: string;
+  target: CaptureAcquisitionTarget;
+  artifactPath?: string | null;
 }
 
 export interface CaptureRecord {
@@ -206,6 +247,8 @@ export interface CaptureRecord {
   createdAt: string;
   updatedAt: string;
   acquisition?: CaptureAcquisitionRecord;
+  acquisitionCoverage?: CaptureAcquisitionCoverage;
+  acquisitionAttempts?: CaptureAcquisitionAttemptRecord[];
   rawPaths: {
     inbox: string;
     capture: string;
@@ -215,6 +258,7 @@ export interface CaptureRecord {
     artifacts: {
       transcript: string | null;
       mediaAnalysis: string | null;
+      moments: string | null;
     };
   };
   metadata: UrlMetadata;
@@ -235,6 +279,37 @@ export interface MediaAnalysisMoment {
   confidence?: number;
 }
 
+export interface CaptureMomentEvidence {
+  source: "transcript" | "media-analysis" | "capture-note" | "asset";
+  text?: string | null;
+  assetId?: string | null;
+  segmentIndex?: number;
+  mediaMomentIndex?: number;
+  signalSlugs?: string[];
+}
+
+export interface CaptureMomentRecord {
+  id: string;
+  captureId: string;
+  kind: CaptureMomentKind;
+  label: string;
+  summary: string;
+  startMs?: number;
+  endMs?: number;
+  speaker?: string;
+  assetId?: string | null;
+  signalTags: string[];
+  evidence: CaptureMomentEvidence[];
+}
+
+export interface CaptureMomentsArtifact {
+  captureId: string;
+  generatedAt: string;
+  transcriptGenerationId?: string | null;
+  mediaAnalysisGenerationId?: string | null;
+  moments: CaptureMomentRecord[];
+}
+
 export interface MediaAnalysisArtifact {
   captureId: string;
   status: MediaAnalysisArtifactStatus;
@@ -245,6 +320,7 @@ export interface MediaAnalysisArtifact {
   storySignals: SignalTag[];
   moments: MediaAnalysisMoment[];
   generatedAt: string;
+  generation?: ArtifactGenerationMetadata;
   acquisition?: {
     mode: CaptureAcquisitionMode;
     provider: CaptureAcquisitionProvider;
@@ -261,9 +337,15 @@ export interface ProvenanceRecord {
 }
 
 export interface ReferenceMoment {
+  id?: string;
+  kind?: CaptureMomentKind;
   label: string;
   description: string;
   assetId?: string;
+  startMs?: number;
+  endMs?: number;
+  speaker?: string;
+  signalTags?: string[];
 }
 
 export interface AnalysisResult {
@@ -426,6 +508,13 @@ export interface QueryIndexEntry {
   supportingReferenceIds?: string[];
   pageHealth?: WikiLintIssueKind[];
   articleKind?: WikiArticleKind | null;
+  // Moment-specific fields (only present when kind === "moment")
+  momentId?: string;
+  momentKind?: CaptureMomentKind;
+  momentStartMs?: number;
+  momentEndMs?: number;
+  momentSpeaker?: string;
+  momentAssetId?: string | null;
 }
 
 export interface QuerySearchResponse {
@@ -597,6 +686,7 @@ export interface IdeaGenerationContext {
   constitutionExcerpt: string;
   notMeExcerpt: string;
   transcriptExcerpts: Record<string, string>;
+  momentExcerpts: Record<string, ReferenceMoment[]>;
   wikiArticles: Array<{
     path: string;
     title: string;
