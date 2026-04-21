@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { findPage } from "../render/markdown.js";
 import {
   applyWikiCleanup,
   buildIdeaGenerationContext,
@@ -1866,6 +1867,54 @@ test("wiki article detail exposes structured encyclopedia context and lint finds
     lint.issues.length > 0
       || fs.readdirSync(path.join(root, "wiki", "concepts")).some((file) => file.endsWith(".md")),
   );
+});
+
+test("folder-split concept pages resolve through their index file", () => {
+  const root = makeTempRoot();
+  const conceptDir = path.join(root, "wiki", "concepts", "ritual-practice");
+  fs.mkdirSync(conceptDir, { recursive: true });
+  fs.writeFileSync(path.join(conceptDir, "index.md"), [
+    "---",
+    "title: Ritual Practice",
+    "type: concept",
+    "---",
+    "",
+    "# Ritual Practice",
+    "",
+    "A folder-split concept page should resolve from the folder path.",
+    "",
+    "## Canonical References",
+    "- None yet.",
+    "",
+  ].join("\n"));
+
+  const found = findPage(root, "concepts/ritual-practice");
+  assert.equal(found?.endsWith(path.join("wiki", "concepts", "ritual-practice", "index.md")), true);
+
+  const article = getWikiArticleDetail(root, "wiki/concepts/ritual-practice");
+  assert.equal(article.path, "wiki/concepts/ritual-practice/index.md");
+  assert.equal(article.title, "Ritual Practice");
+});
+
+test("missing motif pages render a placeholder article with backlinks instead of failing", () => {
+  const root = makeTempRoot();
+  compileAftertaste(root);
+
+  const snapshotPath = path.join(root, "wiki", "snapshots", "2026-W01.md");
+  fs.writeFileSync(snapshotPath, [
+    "# Week 1 Snapshot",
+    "",
+    "- [[motifs/soft-color|Soft Color]]",
+    "- [[concepts/ritual-practice|Ritual Practice]]",
+    "",
+  ].join("\n"));
+
+  const article = getWikiArticleDetail(root, "wiki/motifs/soft-color.md");
+  assert.equal(article.path, "wiki/motifs/soft-color.md");
+  assert.equal(article.title, "Soft Color");
+  assert.ok(article.lead.includes("current compile"));
+  assert.ok(article.backlinks.some((link) => link.path === "wiki/snapshots/2026-W01.md"));
+  assert.ok(article.raw?.includes("[[snapshots/2026-W01|Week 1 Snapshot]]"));
 });
 
 test("wiki cleanup preview and apply keep maintenance actions reviewable and executable", async () => {

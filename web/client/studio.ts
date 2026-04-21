@@ -4,7 +4,7 @@ import { installFeedbackUI } from "./feedback.js";
 import type { TasteGraph, WikiArticleDetail, WikiCleanupPreview, WikiLintReport } from "../shared/contracts.js";
 import { renderGraph, type GraphHandle, type GraphNode } from "./graph.js";
 import { ParticleField } from "./particles.js";
-import { renderTree } from "./tree.js";
+import { renderTree, type TreeNode } from "./tree.js";
 
 interface StudioOptions {
   author: string;
@@ -31,6 +31,7 @@ export class StudioController {
   private initialized = false;
   private graphTeardown: (() => void) | null = null;
   private graphZoom: Pick<GraphHandle, "zoomIn" | "zoomOut" | "zoomReset"> | null = null;
+  private treeData: TreeNode | null = null;
 
   constructor(opts: StudioOptions) {
     this.state = {
@@ -116,29 +117,26 @@ export class StudioController {
 
     const closeGraph = () => {
       graphOverlay?.classList.add("hidden");
-      if (this.graphTeardown) {
-        this.graphTeardown();
-        this.graphTeardown = null;
-      }
+      if (this.graphTeardown) { this.graphTeardown(); this.graphTeardown = null; }
       this.graphZoom = null;
     };
 
-    document.getElementById("graph-zoom-in")?.addEventListener("click", () => this.graphZoom?.zoomIn());
+    document.getElementById("graph-zoom-in")?.addEventListener("click",  () => this.graphZoom?.zoomIn());
     document.getElementById("graph-zoom-out")?.addEventListener("click", () => this.graphZoom?.zoomOut());
 
     const openGraph = async () => {
       if (!graphOverlay) return;
       graphOverlay.classList.remove("hidden");
       graphOverlay.classList.remove("is-opening");
-      void (graphOverlay as HTMLElement).offsetWidth; // force reflow so animation restarts
+      void (graphOverlay as HTMLElement).offsetWidth;
       graphOverlay.classList.add("is-opening");
       await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
-      const data = (await fetch("/api/graph/taste").then((response) => response.json())) as TasteGraph;
-      const svg = document.getElementById("graph-svg") as unknown as SVGSVGElement | null;
+      const data = (await fetch("/api/graph/taste").then((r) => r.json())) as TasteGraph;
+      const svg    = document.getElementById("graph-svg") as unknown as SVGSVGElement | null;
       const canvas = document.getElementById("graph-particles") as HTMLCanvasElement | null;
       if (!svg || !canvas) return;
       if (this.graphTeardown) this.graphTeardown();
-      const particles = new ParticleField(canvas, 80);
+      const particles = new ParticleField(canvas, 55);
       particles.start();
       const handle = renderGraph(svg, data, {
         onNodeClick: (node: GraphNode) => {
@@ -148,10 +146,7 @@ export class StudioController {
         },
       });
       this.graphZoom = handle;
-      this.graphTeardown = () => {
-        particles.stop();
-        handle.teardown();
-      };
+      this.graphTeardown = () => { particles.stop(); handle.teardown(); };
     };
 
     openButton?.addEventListener("click", () => {
@@ -177,12 +172,15 @@ export class StudioController {
   private async refreshTree(): Promise<void> {
     const container = document.getElementById("tree");
     if (!container) return;
-    container.innerHTML = skeletonCards(6);
-    const tree = await fetch("/api/tree").then((response) => response.json());
+    if (!this.treeData) {
+      container.innerHTML = skeletonCards(6);
+    }
+    const tree = (await fetch("/api/tree").then((response) => response.json())) as TreeNode;
+    this.treeData = tree;
     renderTree(container, tree, (page) => {
       history.pushState({ view: "studio", page }, "", buildStudioUrl(page));
       void this.loadPage(page);
-    });
+    }, this.state.currentPath);
   }
 
   private async loadPage(pathArg: string): Promise<void> {
@@ -236,9 +234,12 @@ export class StudioController {
   }
 
   private highlightTreeSelection(pathValue: string): void {
-    document.querySelectorAll("#tree a.active").forEach((element) => element.classList.remove("active"));
-    const link = document.querySelector(`#tree a[data-path="${cssEscape(pathValue)}"]`);
-    if (link) link.classList.add("active");
+    const container = document.getElementById("tree");
+    if (!container || !this.treeData) return;
+    renderTree(container, this.treeData, (page) => {
+      history.pushState({ view: "studio", page }, "", buildStudioUrl(page));
+      void this.loadPage(page);
+    }, pathValue);
   }
 
   private async loadLint(): Promise<void> {

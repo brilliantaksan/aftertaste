@@ -663,6 +663,38 @@ export function listReferences(
   };
 }
 
+export async function listReferencesSmart(
+  root: string,
+  filters?: {
+    theme?: string;
+    motif?: string;
+    creator?: string;
+    format?: string;
+    platform?: string;
+    q?: string;
+  },
+): Promise<ReferencesResponse> {
+  const base = listReferences(root, filters);
+  const q = filters?.q?.trim() ?? "";
+  if (q.length < 3 || base.references.length < 2) return base;
+
+  const candidates = base.references
+    .slice(0, Math.min(12, base.references.length))
+    .map((reference) => buildReferenceQueryCandidate(reference));
+  const rerankedIds = await rerankQueryEntries({ query: q, candidates });
+  if (!rerankedIds || rerankedIds.length === 0) return base;
+
+  const rankedSet = new Set(rerankedIds);
+  const byId = new Map(base.references.map((reference) => [reference.id, reference]));
+  return {
+    ...base,
+    references: [
+      ...rerankedIds.map((id) => byId.get(id)).filter((reference): reference is ReferenceSummary => reference != null),
+      ...base.references.filter((reference) => !rankedSet.has(reference.id)),
+    ],
+  };
+}
+
 export function searchQueryIndex(
   root: string,
   filters?: {
@@ -689,6 +721,30 @@ export function searchQueryIndex(
 
   return {
     results: filtered,
+  };
+}
+
+function buildReferenceQueryCandidate(reference: ReferenceSummary): QueryIndexEntry {
+  return {
+    id: reference.id,
+    kind: "reference",
+    title: reference.title,
+    summary: reference.summary,
+    tags: [
+      ...reference.themes.map((signal) => signal.label),
+      ...reference.motifs.map((signal) => signal.label),
+      ...reference.creatorSignals.map((signal) => signal.label),
+      ...reference.formatSignals.map((signal) => signal.label),
+      ...reference.toneSignals.map((signal) => signal.label),
+    ].slice(0, 10),
+    handles: [],
+    dates: {
+      createdAt: reference.createdAt,
+      updatedAt: reference.provenance.compiledAt,
+    },
+    sourceIds: [reference.id],
+    path: reference.pagePath,
+    supportingReferenceIds: reference.relatedReferenceIds.slice(0, 4),
   };
 }
 
@@ -3203,14 +3259,15 @@ function syncTasteGraph(root: string, references = readCompiledReferences(root))
 
 export function getWikiArticleDetail(root: string, articlePath: string): WikiArticleDetail {
   ensureAftertasteWorkspace(root);
-  const safePath = normalizeWikiArticlePath(articlePath);
-  const fullPath = path.join(root, safePath);
-  if (!fs.existsSync(fullPath)) {
+  let safePath = resolveExistingWikiArticlePath(root, articlePath);
+  if (!safePath) {
     compileAftertaste(root);
+    safePath = resolveExistingWikiArticlePath(root, articlePath);
   }
-  if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
-    throw new Error(`wiki article not found: ${articlePath}`);
+  if (!safePath) {
+    return buildMissingWikiArticleDetail(root, normalizeWikiArticlePath(articlePath));
   }
+  const fullPath = path.join(root, safePath);
 
   const raw = fs.readFileSync(fullPath, "utf-8");
   const parsed = parseMarkdownArticle(raw);
@@ -3477,11 +3534,27 @@ export async function applyWikiCleanup(root: string): Promise<WikiCleanupPreview
 }
 
 function normalizeWikiArticlePath(input: string): string {
+  const normalized = normalizeWikiArticleRequest(input);
+  return normalized.endsWith(".md") ? normalized : `${normalized}.md`;
+}
+
+function normalizeWikiArticleRequest(input: string): string {
   const normalized = path.posix.normalize(input || "wiki/index.md");
   if (normalized.startsWith("..") || path.isAbsolute(normalized)) {
     throw new Error("invalid wiki path");
   }
-  return normalized.endsWith(".md") ? normalized : `${normalized}.md`;
+  return normalized;
+}
+
+function buildWikiArticlePathCandidates(input: string): string[] {
+  const normalized = normalizeWikiArticleRequest(input);
+  const trimmed = normalized.endsWith(".md") ? normalized.slice(0, -3) : normalized;
+  const base = trimmed.endsWith("/index") ? trimmed.slice(0, -"/index".length) : trimmed;
+  return uniqueStrings([
+    `${trimmed}.md`,
+    `${base}.md`,
+    path.posix.join(base, "index.md"),
+  ]);
 }
 
 function parseMarkdownArticle(raw: string): {
@@ -3586,9 +3659,24 @@ function resolveWikiTarget(root: string, target: string): string | null {
   return found ? toRel(root, found) : null;
 }
 
+function resolveExistingWikiArticlePath(root: string, articlePath: string): string | null {
+  const normalizedRequest = normalizeWikiArticleRequest(articlePath);
+  for (const candidate of buildWikiArticlePathCandidates(normalizedRequest)) {
+    const fullPath = path.join(root, candidate);
+    if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+      return candidate;
+    }
+  }
+
+  const trimmed = normalizedRequest.endsWith(".md") ? normalizedRequest.slice(0, -3) : normalizedRequest;
+  const target = trimmed.startsWith("wiki/") ? trimmed.slice("wiki/".length) : trimmed;
+  const found = findPage(root, target) ?? findPage(root, normalizedRequest);
+  return found ? toRel(root, found) : null;
+}
+
 function readWikiPageTitle(root: string, articlePath: string): string {
   const fullPath = path.join(root, articlePath);
-  if (!fs.existsSync(fullPath)) return path.basename(articlePath, ".md");
+  if (!fs.existsSync(fullPath)) return titleFromWikiPath(articlePath);
   return parseMarkdownArticle(fs.readFileSync(fullPath, "utf-8")).title;
 }
 
@@ -3601,6 +3689,129 @@ function collectWikiBacklinks(root: string, targetPath: string): string[] {
       .filter((value): value is string => value != null);
     return resolved.includes(targetPath);
   });
+}
+
+function collectWikiMentionBacklinks(root: string, targetPath: string): string[] {
+  const targetKeys = new Set(buildWikiLookupTargets(targetPath));
+  return collectWikiMarkdownPaths(root).filter((candidatePath) => {
+    if (candidatePath === targetPath) return false;
+    const raw = fs.readFileSync(path.join(root, candidatePath), "utf-8");
+    return extractWikiLinks(raw).some((target) => buildWikiLookupTargets(target).some((key) => targetKeys.has(key)));
+  });
+}
+
+function buildMissingWikiArticleDetail(root: string, articlePath: string): WikiArticleDetail {
+  const kind = inferWikiArticleKind(articlePath, null);
+  const title = titleFromWikiPath(articlePath);
+  const backlinks = collectWikiMentionBacklinks(root, articlePath).map((backlink) => ({
+    path: backlink,
+    title: readWikiPageTitle(root, backlink),
+  }));
+  const relatedPaths = collectWikiMarkdownPaths(root)
+    .filter((candidatePath) => {
+      if (candidatePath === articlePath) return false;
+      if (kind === "motif") return candidatePath.startsWith("wiki/motifs/");
+      if (kind === "concept") return candidatePath.startsWith("wiki/concepts/");
+      if (kind === "theme") return candidatePath.startsWith("wiki/themes/");
+      if (kind === "creator") return candidatePath.startsWith("wiki/creators/");
+      if (kind === "format") return candidatePath.startsWith("wiki/formats/");
+      return candidatePath === "wiki/index.md" || candidatePath === "wiki/snapshots/current.md";
+    })
+    .slice(0, 3)
+    .map((candidatePath) => ({
+      path: candidatePath,
+      title: readWikiPageTitle(root, candidatePath),
+    }));
+  const raw = buildMissingWikiArticleMarkdown(articlePath, title, kind, backlinks, relatedPaths);
+  const parsed = parseMarkdownArticle(raw);
+
+  return {
+    path: articlePath,
+    title,
+    kind,
+    lead: parsed.lead,
+    sections: parsed.sections,
+    backlinks,
+    relatedPaths,
+    supportingReferenceIds: [],
+    tensions: [],
+    openQuestions: extractBulletSection(parsed.sections, "Open Questions").slice(0, 6),
+    lastCompiledAt: null,
+    health: [],
+    raw,
+  };
+}
+
+function buildMissingWikiArticleMarkdown(
+  _articlePath: string,
+  title: string,
+  kind: WikiArticleKind,
+  backlinks: Array<{ path: string; title: string }>,
+  relatedPaths: Array<{ path: string; title: string }>,
+): string {
+  const frontmatter = formatFrontmatter({
+    title,
+    type: kind === "unknown" ? "concept" : kind,
+    article_kind: kind === "unknown" ? "concept" : kind,
+    updated: new Date().toISOString().slice(0, 10),
+  });
+  const kindLabel = kind === "unknown" ? "wiki page" : `${kind} page`;
+  return [
+    frontmatter,
+    `# ${title}`,
+    "",
+    `This ${kindLabel} is still referenced somewhere in the vault, but the current compile does not materialize it as a standalone article anymore.`,
+    "",
+    "## Why This Is Happening",
+    "- One or more older snapshot or idea pages still link here.",
+    "- The current compile only writes motif, concept, and related pages that are backed by the current reference summaries.",
+    "",
+    "## Referenced From",
+    backlinks.length > 0
+      ? backlinks.map((link) => `- [[${toWikiLinkTarget(link.path)}|${link.title}]]`).join("\n")
+      : "- No active wiki page still points here.",
+    "",
+    "## Nearby Pages",
+    relatedPaths.length > 0
+      ? relatedPaths.map((link) => `- [[${toWikiLinkTarget(link.path)}|${link.title}]]`).join("\n")
+      : "- [[index|Index — Aftertaste]]",
+    "",
+    "## Open Questions",
+    `- Should ${title} come back as a real ${kind === "unknown" ? "wiki" : kind} page, or should the older backlinks be updated to point somewhere else?`,
+    "",
+  ].join("\n");
+}
+
+function buildWikiLookupTargets(input: string): string[] {
+  const normalized = normalizeWikiArticleRequest(input);
+  const trimmed = normalized.endsWith(".md") ? normalized.slice(0, -3) : normalized;
+  const withoutIndex = trimmed.endsWith("/index") ? trimmed.slice(0, -"/index".length) : trimmed;
+  const withoutWiki = withoutIndex.startsWith("wiki/") ? withoutIndex.slice("wiki/".length) : withoutIndex;
+  const withWiki = withoutWiki ? `wiki/${withoutWiki}` : withoutIndex;
+  const targets = [withWiki, `${withWiki}.md`, `${withWiki}/index`, `${withWiki}/index.md`, normalized];
+  if (withoutWiki) {
+    targets.push(withoutWiki, `${withoutWiki}.md`, `${withoutWiki}/index`, `${withoutWiki}/index.md`);
+  }
+  return uniqueStrings(targets.filter(Boolean));
+}
+
+function titleFromWikiPath(articlePath: string): string {
+  const normalized = normalizeWikiArticleRequest(articlePath);
+  const withoutMd = normalized.replace(/\.md$/, "");
+  const leaf = withoutMd.endsWith("/index")
+    ? path.posix.basename(path.posix.dirname(withoutMd))
+    : path.posix.basename(withoutMd);
+  return leaf
+    .split("-")
+    .filter(Boolean)
+    .map((part) => sentenceCase(part))
+    .join(" ");
+}
+
+function toWikiLinkTarget(articlePath: string): string {
+  const normalized = normalizeWikiArticleRequest(articlePath);
+  const withoutWiki = normalized.startsWith("wiki/") ? normalized.slice("wiki/".length) : normalized;
+  return withoutWiki.replace(/\.md$/, "");
 }
 
 function extractBulletSection(sections: WikiArticleDetail["sections"], heading: string): string[] {

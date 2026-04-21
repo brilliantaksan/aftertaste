@@ -144,30 +144,66 @@ export function findPage(wikiRoot: string, target: string): string | null {
     return null;
   };
 
-  const direct =
-    tryPath(target) ||
-    tryPath(target + ".md") ||
-    tryPath(path.posix.join("wiki", target)) ||
-    tryPath(path.posix.join("wiki", `${target}.md`));
+  const direct = buildTargetPathCandidates(target)
+    .map((candidate) => tryPath(candidate))
+    .find((candidate): candidate is string => candidate != null);
   if (direct) return direct;
 
-  // Fallback: scan wiki/ for matching stem.
+  // Fallback: scan wiki/ for matching stem or relative path.
   const wikiDir = path.join(wikiRoot, "wiki");
   if (!fs.existsSync(wikiDir)) return null;
   const match = findByStem(wikiDir, target);
   return match;
 }
 
-function findByStem(dir: string, target: string): string | null {
+function buildTargetPathCandidates(target: string): string[] {
+  const normalized = path.posix.normalize(target || "").replace(/^\/+/, "");
+  const trimmed = normalized.endsWith(".md") ? normalized.slice(0, -3) : normalized;
+  const base = trimmed.endsWith("/index") ? trimmed.slice(0, -"/index".length) : trimmed;
+  const relativeBase = base.startsWith("wiki/") ? base.slice("wiki/".length) : base;
+
+  const candidates = [
+    `${base}.md`,
+    path.posix.join(base, "index.md"),
+    `${relativeBase}.md`,
+    path.posix.join(relativeBase, "index.md"),
+    path.posix.join("wiki", `${relativeBase}.md`),
+    path.posix.join("wiki", relativeBase, "index.md"),
+  ];
+
+  return Array.from(new Set(candidates.filter((candidate) => candidate && candidate !== "wiki/.md")));
+}
+
+function findByStem(dir: string, target: string, rootDir = dir): string | null {
+  const normalizedTarget = path.posix.normalize(target || "").replace(/^\/+/, "");
+  const targetWithoutWiki = normalizedTarget.startsWith("wiki/") ? normalizedTarget.slice("wiki/".length) : normalizedTarget;
+  const targetWithoutMd = targetWithoutWiki.replace(/\.md$/, "");
+  const targetWithoutIndex = targetWithoutMd.replace(/\/index$/, "");
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   for (const e of entries) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
-      const sub = findByStem(full, target);
+      const sub = findByStem(full, target, rootDir);
       if (sub) return sub;
     } else if (e.isFile() && e.name.endsWith(".md")) {
       const stem = e.name.replace(/\.md$/, "");
-      if (stem === target || e.name === target) return full;
+      const rel = path.relative(rootDir, full).split(path.sep).join("/");
+      const relWithoutMd = rel.replace(/\.md$/, "");
+      const relWithoutIndex = relWithoutMd.replace(/\/index$/, "");
+      if (
+        stem === normalizedTarget
+        || stem === targetWithoutWiki
+        || e.name === normalizedTarget
+        || e.name === targetWithoutWiki
+        || rel === normalizedTarget
+        || rel === targetWithoutWiki
+        || relWithoutMd === normalizedTarget
+        || relWithoutMd === targetWithoutWiki
+        || relWithoutMd === targetWithoutMd
+        || relWithoutIndex === targetWithoutIndex
+      ) {
+        return full;
+      }
     }
   }
   return null;

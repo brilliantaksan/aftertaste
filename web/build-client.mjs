@@ -4,6 +4,7 @@ import esbuild from "esbuild";
 import fs from "node:fs";
 import path from "node:path";
 import url from "node:url";
+import { execSync } from "node:child_process";
 
 const here = path.dirname(url.fileURLToPath(import.meta.url));
 const outDir = path.join(here, "dist/client");
@@ -12,6 +13,12 @@ const staticDir = path.join(here, "client/static");
 
 fs.rmSync(outDir, { recursive: true, force: true });
 fs.mkdirSync(assetsDir, { recursive: true });
+
+// Compile Tailwind CSS
+execSync(
+  `npx tailwindcss -i ${path.join(here, 'client/tailwind.css')} -o ${path.join(assetsDir, 'tailwind.css')} --minify`,
+  { cwd: here, stdio: "inherit" }
+);
 
 /**
  * @param {string} sourceDir
@@ -43,6 +50,8 @@ await esbuild.build({
   treeShaking: true,
   minify: true,
   logLevel: "info",
+  jsx: "automatic",
+  jsxImportSource: "react",
 });
 
 // Copy static files.

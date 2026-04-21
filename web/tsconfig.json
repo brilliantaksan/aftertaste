@@ -12,11 +12,12 @@
     "isolatedModules": true,
     "resolveJsonModule": true,
     "noEmit": true,
+    "jsx": "react-jsx",
     "paths": {
       "audit-shared": ["../audit-shared/src/index.ts"]
     },
-    "types": ["node"]
+    "types": ["node", "react"]
   },
-  "include": ["server/**/*.ts", "client/**/*.ts", "shared/**/*.ts", "build-client.mjs"],
+  "include": ["server/**/*.ts", "client/**/*.ts", "client/**/*.tsx", "shared/**/*.ts", "build-client.mjs"],
   "exclude": ["node_modules", "dist"]
 }

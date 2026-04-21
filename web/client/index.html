@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Aftertaste</title>
     <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/tailwind.css" />
     <link rel="stylesheet" href="/katex/katex.min.css" />
   </head>
   <body>
@@ -28,7 +29,7 @@
         <nav class="site-nav">
           <button class="nav-pill is-active" type="button" data-nav-view="home">Home</button>
           <button class="nav-pill" type="button" data-nav-view="capture">Capture</button>
-          <button class="nav-pill" type="button" data-nav-view="references">References</button>
+          <div id="header-search-dock-root" class="site-search-dock-slot"></div>
           <button class="nav-pill" type="button" data-nav-view="ideas">Create Ideas</button>
           <button class="nav-pill" type="button" data-nav-view="studio">Wiki Explorer</button>
         </nav>
@@ -51,7 +52,7 @@
         </div>
       </header>
 
-      <main class="workspace-shell">
+      <main class="workspace-shell" id="workspace-shell">
         <header class="workspace-topbar">
           <div class="workspace-heading">
             <span class="eyebrow">Creative operating surface</span>
@@ -73,39 +74,36 @@
 
           <section id="view-studio" class="view-panel hidden" data-view-panel="studio">
             <div class="studio-shell">
-              <header class="studio-topbar">
-                <div class="studio-heading">
-                  <span class="eyebrow">Wiki Explorer</span>
-                  <strong id="wiki-title">wiki/index.md</strong>
-                </div>
-                <div class="studio-actions">
-                  <button id="btn-lint" class="pill-btn" type="button" title="Wiki lint">Lint</button>
-                  <button id="btn-cleanup" class="pill-btn pill-btn-muted" type="button" title="Apply wiki cleanup">Cleanup</button>
-                  <button id="btn-graph" class="pill-btn" type="button" title="Knowledge graph (G)">Graph <kbd>G</kbd></button>
-                  <button id="btn-refresh" class="pill-btn pill-btn-muted" type="button" title="Refresh">Refresh</button>
-                </div>
-              </header>
-
               <div class="studio-grid">
-                <aside id="sidebar-left" class="surface-card studio-column">
-                  <header class="surface-head">
-                    <div>
-                      <span class="eyebrow">Wiki</span>
-                      <h2>Navigation</h2>
-                    </div>
-                  </header>
-                  <nav id="tree"><p class="loading">Loading wiki</p></nav>
+                <aside id="sidebar-left" class="studio-left-rail studio-column">
+                  <nav id="tree" class="studio-explorer-rail"><p class="loading">Loading wiki</p></nav>
                 </aside>
 
-                <section class="surface-card studio-main">
+                <section class="studio-main wiki-window-shell">
+                  <div class="studio-page-toolbar studio-window-toolbar">
+                    <div class="studio-toolbar-meta">
+                      <div class="studio-page-meta">
+                        <span class="eyebrow">Article path</span>
+                        <span id="wiki-title">wiki/index.md</span>
+                      </div>
+                    </div>
+                    <div class="studio-actions">
+                      <button id="btn-lint" class="pill-btn" type="button" title="Wiki lint">Lint</button>
+                      <button id="btn-cleanup" class="pill-btn pill-btn-muted" type="button" title="Apply wiki cleanup">Cleanup</button>
+                      <button id="btn-graph" class="pill-btn" type="button" title="Knowledge graph (G)">Graph <kbd>G</kbd></button>
+                      <button id="btn-refresh" class="pill-btn pill-btn-muted" type="button" title="Refresh">Refresh</button>
+                    </div>
+                  </div>
                   <article id="page-content"><p class="loading">Loading page</p></article>
                 </section>
 
-                <aside id="sidebar-right" class="surface-card studio-column">
-                  <header class="surface-head">
-                    <div>
-                      <span class="eyebrow">Encyclopedia</span>
-                      <h2>Context rail</h2>
+                <aside id="sidebar-right" class="studio-column studio-context-rail wiki-window-shell">
+                  <header class="studio-rail-head studio-window-toolbar">
+                    <div class="studio-toolbar-meta">
+                      <div>
+                        <span class="eyebrow">Encyclopedia</span>
+                        <h2>Context rail</h2>
+                      </div>
                     </div>
                   </header>
                   <div id="article-context"><p class="loading">Loading article context</p></div>
@@ -192,16 +190,16 @@
             <button class="graph-ctrl-btn" id="graph-zoom-in" type="button" title="Zoom in">+</button>
             <button class="graph-ctrl-btn" id="graph-zoom-out" type="button" title="Zoom out">−</button>
           </div>
-          <div class="graph-hint">drag nodes · scroll to zoom · click to open</div>
+          <div class="graph-hint">drag · scroll to zoom · click to open</div>
           <div class="graph-legend">
-            <div class="legend-row"><span class="legend-dot references"></span> references</div>
-            <div class="legend-row"><span class="legend-dot themes"></span> themes</div>
-            <div class="legend-row"><span class="legend-dot motifs"></span> motifs</div>
-            <div class="legend-row"><span class="legend-dot creators"></span> creators</div>
-            <div class="legend-row"><span class="legend-dot formats"></span> formats</div>
-            <div class="legend-row"><span class="legend-dot snapshots"></span> snapshots</div>
-            <div class="legend-row"><span class="legend-dot briefs"></span> briefs</div>
-            <div class="legend-row"><span class="legend-dot sessions"></span> sessions</div>
+            <div class="legend-row"><span class="legend-dot references"></span>references</div>
+            <div class="legend-row"><span class="legend-dot themes"></span>themes</div>
+            <div class="legend-row"><span class="legend-dot motifs"></span>motifs</div>
+            <div class="legend-row"><span class="legend-dot creators"></span>creators</div>
+            <div class="legend-row"><span class="legend-dot formats"></span>formats</div>
+            <div class="legend-row"><span class="legend-dot snapshots"></span>snapshots</div>
+            <div class="legend-row"><span class="legend-dot briefs"></span>briefs</div>
+            <div class="legend-row"><span class="legend-dot sessions"></span>sessions</div>
           </div>
         </div>
       </div>
