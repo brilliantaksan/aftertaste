@@ -13,11 +13,21 @@ import type {
   ReferenceSummary,
   ReferencesResponse,
   SignalTag,
+  SourceKind,
   TasteSnapshot,
 } from "../shared/contracts.js";
+import { createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { StudioController, buildStudioUrl } from "./studio.js";
+import { ExpandingSearchDock } from "./components/ui/expanding-search-dock-shadcnui.js";
+import { ReferenceSearchResults, type SearchReferenceCardItem } from "./components/ui/reference-search-results.js";
+import { mountHomeView } from "./home/index.js";
+import { initButtonMotion } from "./lib/button-motion.js";
+import { initCardMotion } from "./lib/card-motion.js";
+import { PromptInputBox, type PromptSendPayload } from "./components/ui/ai-prompt-box.js";
 
 type ViewName = "home" | "capture" | "references" | "ideas" | "studio";
+type ReferenceSearchMediaType = "all" | "webpages" | "videos" | "quotes" | "x-posts" | "images" | "articles" | "notes";
 
 interface AppConfig {
   author: string;
@@ -27,11 +37,7 @@ interface AppConfig {
 }
 
 interface ReferenceFiltersState {
-  theme: string;
-  motif: string;
-  creator: string;
-  format: string;
-  platform: string;
+  mediaType: ReferenceSearchMediaType;
   q: string;
 }
 
@@ -51,6 +57,12 @@ interface BriefFormState {
   constraints: string;
 }
 
+interface SearchResultLayout {
+  colSpan?: number;
+  rowSpan?: number;
+  hasPersistentHover?: boolean;
+}
+
 interface AppState {
   config: AppConfig | null;
   view: ViewName;
@@ -65,6 +77,7 @@ interface AppState {
   captureResult: CaptureDetailResponse | null;
   captureStatus: "idle" | "saving";
   captureError: string | null;
+  captureCollection: string | null;
   ideaForm: IdeaFormState;
   briefs: ProjectBrief[];
   briefForm: BriefFormState;
@@ -95,11 +108,7 @@ const state: AppState = {
   catalog: emptyReferences,
   references: emptyReferences,
   referenceFilters: {
-    theme: "",
-    motif: "",
-    creator: "",
-    format: "",
-    platform: "",
+    mediaType: "all",
     q: "",
   },
   selectedReferenceId: null,
@@ -109,6 +118,7 @@ const state: AppState = {
   captureResult: null,
   captureStatus: "idle",
   captureError: null,
+  captureCollection: null,
   ideaForm: {
     outputType: "script",
     brief: "",
@@ -141,8 +151,8 @@ const viewChrome: Record<ViewName, { title: string; meta: string }> = {
     meta: "Get new material into the vault fast, then let analysis do the slow work later.",
   },
   references: {
-    title: "Reference Atlas",
-    meta: "Search by feeling, inspect by signal, and keep the surrounding context visible.",
+    title: "Search Archive",
+    meta: "Type what you mean, layer on a few filters, and let the archive surface the closest references.",
   },
   ideas: {
     title: "Create Ideas",
@@ -155,15 +165,36 @@ const viewChrome: Record<ViewName, { title: string; meta: string }> = {
 };
 
 let studioController: StudioController | null = null;
+let capturePromptRoot: Root | null = null;
+let referenceResultsRoot: Root | null = null;
+let headerSearchDockRoot: Root | null = null;
+let referenceRefreshRequestId = 0;
+let referenceSearchDebounceId: number | null = null;
+let searchViewTransitionResetId: number | null = null;
+
+const SEARCH_VIEW_EXIT_MS = 220;
+const SEARCH_VIEW_SETTLE_MS = 460;
 
 async function main(): Promise<void> {
   state.config = await fetchJson<AppConfig>("/api/config");
   studioController = new StudioController({ author: state.config.author });
+  initCardMotion();
+  initButtonMotion();
   bindPointerLighting();
   bindGlobalNavigation();
   window.addEventListener("popstate", () => {
     void syncFromLocation();
   });
+
+  // Mount React home view
+  mountHomeView();
+
+  // Listen for navigate events from React components
+  document.addEventListener("aftertaste:navigate", (e: Event) => {
+    const ce = e as CustomEvent<{ view: string }>;
+    void navigateWithSearchTransition(ce.detail.view as ViewName);
+  });
+
   await refreshData();
   await syncFromLocation();
 }
@@ -187,33 +218,16 @@ async function refreshData(): Promise<void> {
 }
 
 async function refreshReferences(): Promise<void> {
+  const requestId = ++referenceRefreshRequestId;
   state.referenceStatus = "loading";
   renderReferencesView();
   const params = new URLSearchParams();
-  if (state.referenceFilters.theme) params.set("theme", state.referenceFilters.theme);
-  if (state.referenceFilters.motif) params.set("motif", state.referenceFilters.motif);
-  if (state.referenceFilters.creator) params.set("creator", state.referenceFilters.creator);
-  if (state.referenceFilters.format) params.set("format", state.referenceFilters.format);
-  if (state.referenceFilters.platform) params.set("platform", state.referenceFilters.platform);
   if (state.referenceFilters.q) params.set("q", state.referenceFilters.q);
   const url = params.toString() ? `/api/references?${params.toString()}` : "/api/references";
-  const queryParams = new URLSearchParams(params);
-  queryParams.set("kind", "catalyst");
-  queryParams.append("kind", "snapshot");
-  queryParams.append("kind", "constitution");
-  queryParams.append("kind", "not-me");
-  queryParams.append("kind", "brief");
-  queryParams.append("kind", "wiki-article");
-  queryParams.append("kind", "moment");
-  queryParams.append("kind", "creative-session");
-  queryParams.set("limit", "10");
-  const queryUrl = `/api/query?${queryParams.toString()}`;
-  const [references, memoryQuery] = await Promise.all([
-    fetchJson<ReferencesResponse>(url),
-    fetchJson<QuerySearchResponse>(queryUrl),
-  ]);
+  const references = await fetchJson<ReferencesResponse>(url);
+  if (requestId !== referenceRefreshRequestId) return;
   state.references = references;
-  state.memoryQuery = memoryQuery;
+  state.memoryQuery = { results: [] };
   if (!state.selectedReferenceId || !state.references.references.some((reference) => reference.id === state.selectedReferenceId)) {
     state.selectedReferenceId = state.references.references[0]?.id ?? null;
   }
@@ -227,7 +241,7 @@ function bindGlobalNavigation(): void {
     button.addEventListener("click", () => {
       const view = button.getAttribute("data-nav-view") as ViewName | null;
       if (!view) return;
-      void navigate(view);
+      void navigateWithSearchTransition(view);
     });
   });
 }
@@ -239,11 +253,56 @@ async function syncFromLocation(): Promise<void> {
   const view = viewParam ?? (url.searchParams.has("page") ? "studio" : "home");
   state.view = view;
   state.studioPage = page;
+  renderReferencesView();
   updateViewVisibility();
   updateNavState();
+  renderHeader();
   if (view === "studio" && studioController) {
     await studioController.open(page);
   }
+}
+
+function clearSearchViewTransitionState(): void {
+  if (searchViewTransitionResetId != null) {
+    window.clearTimeout(searchViewTransitionResetId);
+    searchViewTransitionResetId = null;
+  }
+  document.getElementById("workspace-shell")?.removeAttribute("data-search-transition");
+  document.getElementById("view-home")?.classList.remove("is-search-transitioning-out", "is-search-transitioning-in");
+  document.getElementById("view-references")?.classList.remove("is-search-transitioning-out", "is-search-transitioning-in");
+}
+
+async function navigateWithSearchTransition(view: ViewName, extras?: { page?: string; replace?: boolean }): Promise<void> {
+  const isHomeToReferences = state.view === "home" && view === "references";
+  const isReferencesToHome = state.view === "references" && view === "home";
+
+  if (!isHomeToReferences && !isReferencesToHome) {
+    clearSearchViewTransitionState();
+    await navigate(view, extras);
+    return;
+  }
+
+  clearSearchViewTransitionState();
+
+  const workspaceShell = document.getElementById("workspace-shell");
+  const outgoingViewId = isHomeToReferences ? "view-home" : "view-references";
+  const incomingViewId = isHomeToReferences ? "view-references" : "view-home";
+  const outgoingPanel = document.getElementById(outgoingViewId);
+
+  workspaceShell?.setAttribute("data-search-transition", isHomeToReferences ? "to-references" : "to-home");
+  outgoingPanel?.classList.add("is-search-transitioning-out");
+
+  await new Promise((resolve) => window.setTimeout(resolve, SEARCH_VIEW_EXIT_MS));
+
+  outgoingPanel?.classList.remove("is-search-transitioning-out");
+  await navigate(view, extras);
+
+  const incomingPanel = document.getElementById(incomingViewId);
+  incomingPanel?.classList.add("is-search-transitioning-in");
+
+  searchViewTransitionResetId = window.setTimeout(() => {
+    clearSearchViewTransitionState();
+  }, SEARCH_VIEW_SETTLE_MS);
 }
 
 async function navigate(view: ViewName, extras?: { page?: string; replace?: boolean }): Promise<void> {
@@ -252,8 +311,10 @@ async function navigate(view: ViewName, extras?: { page?: string; replace?: bool
   const url = buildViewUrl(view, extras?.page ?? state.studioPage);
   if (extras?.replace) history.replaceState({ view, page: state.studioPage }, "", url);
   else history.pushState({ view, page: state.studioPage }, "", url);
+  renderReferencesView();
   updateViewVisibility();
   updateNavState();
+  renderHeader();
   if (view === "studio" && studioController) {
     await studioController.open(state.studioPage);
   }
@@ -266,12 +327,14 @@ function buildViewUrl(view: ViewName, page: string): string {
 
 function renderAll(): void {
   renderHeader();
-  renderHomeView();
+  // Home view is handled by React (mounts into #view-home)
   renderCaptureView();
   renderReferencesView();
   renderIdeasView();
   updateViewVisibility();
   updateNavState();
+  // Notify React components that data has refreshed
+  document.dispatchEvent(new CustomEvent("aftertaste:refresh"));
 }
 
 function renderHeader(): void {
@@ -301,6 +364,59 @@ function renderHeader(): void {
   }
   if (sidebarLeadMotif) {
     sidebarLeadMotif.textContent = state.snapshot?.motifs[0]?.label ?? "A motif is still emerging.";
+  }
+  const dockNode = document.getElementById("header-search-dock-root");
+  if (dockNode) {
+    if (!headerSearchDockRoot) {
+      headerSearchDockRoot = createRoot(dockNode);
+    }
+    headerSearchDockRoot.render(
+      createElement(ExpandingSearchDock, {
+        expanded: state.view === "references",
+        query: state.referenceFilters.q,
+        placeholder: "Search my archive...",
+        filters: REFERENCE_MEDIA_TYPES,
+        activeFilter: state.referenceFilters.mediaType,
+        onExpand: () => {
+          if (referenceSearchDebounceId != null) {
+            window.clearTimeout(referenceSearchDebounceId);
+            referenceSearchDebounceId = null;
+          }
+          state.referenceFilters = { mediaType: "all", q: "" };
+          void refreshReferences();
+          void navigateWithSearchTransition("references");
+        },
+        onCollapse: () => {
+          if (referenceSearchDebounceId != null) {
+            window.clearTimeout(referenceSearchDebounceId);
+            referenceSearchDebounceId = null;
+          }
+          state.referenceFilters = { mediaType: "all", q: "" };
+          void navigateWithSearchTransition("home").then(() => {
+            void refreshReferences();
+          });
+        },
+        onQueryChange: (query: string) => {
+          state.referenceFilters.q = query;
+          renderHeader();
+          if (referenceSearchDebounceId != null) {
+            window.clearTimeout(referenceSearchDebounceId);
+          }
+          referenceSearchDebounceId = window.setTimeout(() => {
+            void refreshReferences();
+          }, 180);
+        },
+        onSearch: () => {
+          void refreshReferences();
+        },
+        onFilterSelect: (value: string) => {
+          const mediaType = (value as ReferenceSearchMediaType) ?? "all";
+          state.referenceFilters.mediaType = state.referenceFilters.mediaType === mediaType ? "all" : mediaType;
+          renderHeader();
+          void refreshReferences();
+        },
+      }),
+    );
   }
   syncWorkspaceChrome();
 }
@@ -672,7 +788,7 @@ function renderHomeView(): void {
     });
   });
   document.getElementById("home-references")?.addEventListener("click", () => {
-    void navigate("references");
+    void navigateWithSearchTransition("references");
   });
   container.querySelectorAll<HTMLButtonElement>("[data-seed-index]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -687,12 +803,11 @@ function renderHomeView(): void {
   });
   container.querySelectorAll<HTMLButtonElement>("[data-signal-filter-kind]").forEach((button) => {
     button.addEventListener("click", () => {
-      const kind = button.getAttribute("data-signal-filter-kind");
       const value = button.getAttribute("data-signal-filter");
-      if (!kind || !value) return;
-      if (kind !== "theme" && kind !== "motif") return;
-      state.referenceFilters[kind] = value;
-      void refreshReferences().then(() => navigate("references"));
+      if (!value) return;
+      state.referenceFilters.mediaType = "all";
+      state.referenceFilters.q = value;
+      void refreshReferences().then(() => navigateWithSearchTransition("references"));
     });
   });
   container.querySelectorAll<HTMLButtonElement>("[data-open-reference]").forEach((button) => {
@@ -701,7 +816,7 @@ function renderHomeView(): void {
       if (!id) return;
       state.selectedReferenceId = id;
       renderReferencesView();
-      void navigate("references");
+      void navigateWithSearchTransition("references");
     });
   });
 }
@@ -718,182 +833,133 @@ function renderOrbitMarquee(items: string[]): string {
     .join("");
 }
 
+function unmountCapturePrompt(): void {
+  if (!capturePromptRoot) return;
+  capturePromptRoot.unmount();
+  capturePromptRoot = null;
+}
+
+function unmountReferenceResults(): void {
+  if (!referenceResultsRoot) return;
+  referenceResultsRoot.unmount();
+  referenceResultsRoot = null;
+}
+
+function inferPromptCaptureSourceKind(message: string, files: File[], sourceUrl: string | null): SourceKind {
+  if (sourceUrl) return "reference";
+  if (files.some((file) => file.type.startsWith("audio/"))) return "voice-note";
+  if (files.some((file) => file.type.startsWith("image/") || file.type.startsWith("video/"))) return "moodboard";
+  if (message.trim()) return "journal";
+  return "reference";
+}
+
+function buildSyntheticCaptureUrl(sourceKind: SourceKind): string {
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `https://capture.aftertaste.local/${sourceKind}/${id}`;
+}
+
+function getCaptureCollectionOptions(): string[] {
+  const ranked = new Map<string, number>();
+  const sources = [
+    ...state.captures.map((capture) => capture.collection ?? ""),
+    ...state.catalog.references.map((reference) => reference.collection ?? ""),
+  ];
+  for (const source of sources) {
+    const value = source.trim();
+    if (!value) continue;
+    ranked.set(value, (ranked.get(value) ?? 0) + 1);
+  }
+  return Array.from(ranked.entries())
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, 8)
+    .map(([value]) => value);
+}
+
+function parseCapturePromptMessage(message: string): { sourceUrl: string | null; note: string } {
+  const match = message.match(/https?:\/\/[^\s<>"']+/i);
+  if (!match || typeof match.index !== "number") {
+    return { sourceUrl: null, note: message.trim() };
+  }
+  const rawUrl = match[0].replace(/[),.;!?]+$/, "");
+  const before = message.slice(0, match.index).trim();
+  const after = message.slice(match.index + match[0].length).trim();
+  return {
+    sourceUrl: rawUrl,
+    note: [before, after].filter(Boolean).join("\n\n"),
+  };
+}
+
 function renderCaptureView(): void {
   const container = document.getElementById("view-capture");
   if (!container) return;
-  const latestCaptures = state.captures.slice(0, 4);
+  unmountCapturePrompt();
   const result = state.captureResult;
-  const topPlatforms = state.catalog.filters.platforms.slice(0, 3).map((item) => item.label).join(" · ") || "No recent source mix yet";
-  const leadTheme = state.snapshot?.themes[0]?.label ?? "Taste signal forming";
+  const collectionOptions = getCaptureCollectionOptions();
   container.innerHTML = `
-    <section class="capture-layout">
-      <article class="surface-card surface-card-accent capture-composer">
-        <header class="surface-head">
-          <div>
-            <span class="eyebrow">Capture</span>
-            <h1>Save first. Let meaning arrive after.</h1>
-          </div>
-        </header>
-        <form id="capture-form" class="capture-form">
-          <div class="capture-form-grid">
-            <label class="field">
-              <span>Source kind</span>
-              <select name="sourceKind">
-                <option value="reference">Reference</option>
-                <option value="journal">Journal</option>
-                <option value="brief">Brief</option>
-                <option value="voice-note">Voice note</option>
-                <option value="moodboard">Moodboard</option>
-              </select>
-            </label>
-            <label class="field">
-              <span>Collection</span>
-              <input name="collection" type="text" placeholder="Linh, Friendships, April client" />
-            </label>
-          </div>
-          <label class="field">
-            <span>Link</span>
-            <input name="sourceUrl" type="url" placeholder="https://www.instagram.com/reel/..." required />
-          </label>
-          <label class="field">
-            <span>Why are you saving it right now?</span>
-            <input name="savedReason" type="text" placeholder="A quick reason you want the future vault to remember" />
-          </label>
-          <label class="field">
-            <span>Note, transcript, or raw text</span>
-            <textarea name="note" rows="6" placeholder="Optional, but useful. Paste the journal line, brief, voice-note summary, or what pulled you in."></textarea>
-          </label>
-          <label class="field">
-            <span>Project IDs</span>
-            <input name="projectIds" type="text" placeholder="Comma-separated project handles like april-launch, friendships" />
-          </label>
-          <label class="field">
-            <span>Screenshots, audio, or video</span>
-            <input name="assets" type="file" multiple />
-          </label>
-          ${state.captureError ? `<p class="inline-error">${escapeHtml(state.captureError)}</p>` : ""}
-          <div class="form-actions">
-            <button class="pill-btn pill-btn-solid" type="submit" ${state.captureStatus === "saving" ? "disabled" : ""}>
-              ${state.captureStatus === "saving" ? "Capturing..." : "Save to Aftertaste"}
-            </button>
-            <button class="pill-btn" type="button" id="capture-compile">Rebuild vault</button>
-          </div>
-        </form>
+    <section class="capture-landing">
+      <article class="capture-stage">
+        <div class="capture-stage-copy">
+          <span class="eyebrow">Capture</span>
+          <h1>Ready to drop something in?</h1>
+          <p>Paste a link, speak a voice note, or throw in screenshots and loose thoughts. One possible next move is to trust the archive to organize what you hand it.</p>
+        </div>
+        <div class="capture-stage-chat" id="capture-prompt-root"></div>
+        ${state.captureError ? `<p class="inline-error capture-inline-error capture-stage-error">${escapeHtml(state.captureError)}</p>` : ""}
+        <div class="capture-stage-actions">
+          <button class="pill-btn" type="button" id="capture-compile">Rebuild vault</button>
+        </div>
+        ${
+          result
+            ? `
+              <section class="surface-card success-panel capture-success-panel capture-success-inline">
+                <header class="surface-head">
+                  <div>
+                    <span class="eyebrow">Captured</span>
+                    <h2>${escapeHtml(result.reference?.title ?? result.capture.metadata.title ?? "New reference added")}</h2>
+                  </div>
+                </header>
+                <p>${escapeHtml(result.analysis?.summary ?? "The capture was saved and folded back into the archive.")}</p>
+                <div class="signal-cloud signal-cloud-tight">
+                  <span class="signal-chip">${escapeHtml(result.capture.sourceKind)}</span>
+                  <span class="signal-chip">${escapeHtml(result.capture.acquisitionCoverage ?? "url-only")}</span>
+                  ${result.capture.collection ? `<span class="signal-chip">${escapeHtml(result.capture.collection)}</span>` : ""}
+                </div>
+                <div class="hero-actions">
+                  <button class="pill-btn pill-btn-solid" id="capture-view-home">See snapshot</button>
+                  <button class="pill-btn" id="capture-open-ideas">Use this in ideas</button>
+                </div>
+              </section>
+            `
+            : ""
+        }
+        <div class="capture-stage-word" aria-hidden="true">CAPTURE</div>
       </article>
-
-      <aside class="capture-rail">
-        <article class="surface-card capture-sidecard">
-          <header class="surface-head surface-head-compact">
-            <div>
-              <span class="eyebrow">Capture atmosphere</span>
-              <h2>What the vault is holding right now</h2>
-            </div>
-          </header>
-          <div class="capture-guideline-grid">
-            <article class="capture-guideline">
-              <span class="detail-label">Processed</span>
-              <strong>${state.captures.length}</strong>
-              <p>captures already folded into the archive.</p>
-            </article>
-            <article class="capture-guideline">
-              <span class="detail-label">Lead theme</span>
-              <strong>${escapeHtml(leadTheme)}</strong>
-              <p>The strongest read in the current snapshot.</p>
-            </article>
-            <article class="capture-guideline capture-guideline-wide">
-              <span class="detail-label">Recent source mix</span>
-              <strong>${escapeHtml(topPlatforms)}</strong>
-              <p>The vault is currently being fed by this blend of platforms and source types.</p>
-            </article>
-          </div>
-        </article>
-
-        <article class="surface-card">
-          <header class="surface-head">
-            <div>
-              <span class="eyebrow">Recent activity</span>
-              <h2>Fresh memories entering the vault</h2>
-            </div>
-          </header>
-          <div class="capture-history">
-            ${latestCaptures.length > 0
-              ? latestCaptures.map((capture) => renderCaptureHistory(capture)).join("")
-              : `<p class="empty-copy">No captures yet.</p>`}
-          </div>
-        </article>
-      </aside>
     </section>
-
-    ${
-      result
-        ? `
-      <section class="surface-card success-panel">
-        <header class="surface-head">
-          <div>
-            <span class="eyebrow">Captured</span>
-            <h2>${escapeHtml(result.reference?.title ?? result.capture.metadata.title ?? "New reference added")}</h2>
-          </div>
-        </header>
-        <p>${escapeHtml(result.analysis?.summary ?? "The capture was saved and folded back into the archive.")}</p>
-        <div class="signal-cloud">${renderSignalChips(result.analysis?.themes ?? [])}</div>
-        <div class="signal-cloud signal-cloud-tight">
-          <span class="signal-chip">${escapeHtml(result.capture.sourceKind)}</span>
-          <span class="signal-chip">${escapeHtml(result.capture.acquisitionCoverage ?? "url-only")}</span>
-          ${result.capture.collection ? `<span class="signal-chip">${escapeHtml(result.capture.collection)}</span>` : ""}
-          ${result.capture.projectIds.map((projectId) => `<span class="signal-chip">${escapeHtml(projectId)}</span>`).join("")}
-        </div>
-        ${
-          (result.capture.acquisitionAttempts?.length ?? 0) > 0
-            ? `
-              <div class="detail-block">
-                <span class="detail-label">Acquisition ladder</span>
-                <ul class="detail-list">
-                  ${result.capture.acquisitionAttempts
-                    ?.map(
-                      (attempt) => `
-                        <li>
-                          <strong>${escapeHtml(attempt.target)}</strong>
-                          ${escapeHtml(`${attempt.mode} · ${attempt.status} · ${attempt.provider}`)}
-                        </li>
-                      `,
-                    )
-                    .join("")}
-                </ul>
-              </div>
-            `
-            : ""
-        }
-        ${
-          (result.analysis?.moments.length ?? 0) > 0
-            ? `
-              <div class="detail-block">
-                <span class="detail-label">Moments surfaced</span>
-                <ul class="detail-list">${(result.analysis?.moments ?? []).map((moment) => `<li><strong>${escapeHtml(moment.label)}:</strong> ${escapeHtml(moment.description)}</li>`).join("")}</ul>
-              </div>
-            `
-            : ""
-        }
-        <div class="hero-actions">
-          <button class="pill-btn pill-btn-solid" id="capture-view-home">See snapshot</button>
-          <button class="pill-btn" id="capture-open-ideas">Use this in ideas</button>
-          <button class="pill-btn pill-btn-muted" id="capture-open-studio">Open Wiki Page</button>
-        </div>
-      </section>
-    `
-        : ""
-    }
   `;
 
-  const form = document.getElementById("capture-form") as HTMLFormElement | null;
-  form?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void handleCaptureSubmit(form);
-  });
+  const promptRootNode = document.getElementById("capture-prompt-root");
+  if (promptRootNode) {
+    capturePromptRoot = createRoot(promptRootNode);
+    capturePromptRoot.render(
+      createElement(PromptInputBox, {
+        isLoading: state.captureStatus === "saving",
+        collectionOptions,
+        selectedCollection: state.captureCollection,
+        onCollectionChange: (value: string | null) => {
+          state.captureCollection = value;
+        },
+        onSend: (payload: PromptSendPayload) => {
+          void handlePromptCaptureSubmit(payload);
+        },
+      }),
+    );
+  }
+
   document.getElementById("capture-compile")?.addEventListener("click", () => {
     void rebuildVault();
   });
   document.getElementById("capture-view-home")?.addEventListener("click", () => {
-    void navigate("home");
+    void navigateWithSearchTransition("home");
   });
   document.getElementById("capture-open-ideas")?.addEventListener("click", () => {
     if (result?.reference?.id) {
@@ -901,12 +967,7 @@ function renderCaptureView(): void {
       state.ideaForm.brief = result.analysis?.summary ?? state.ideaForm.brief;
       renderIdeasView();
     }
-    void navigate("ideas");
-  });
-  document.getElementById("capture-open-studio")?.addEventListener("click", () => {
-    if (result?.reference?.pagePath) {
-      void navigate("studio", { page: result.reference.pagePath });
-    }
+    void navigateWithSearchTransition("ideas");
   });
   document.getElementById("view-capture")?.addEventListener("click", (event) => {
     const btn = (event.target as HTMLElement).closest<HTMLButtonElement>(".history-delete-btn");
@@ -917,6 +978,28 @@ function renderCaptureView(): void {
   });
 }
 
+async function handlePromptCaptureSubmit(payload: PromptSendPayload): Promise<void> {
+  const parsed = parseCapturePromptMessage(payload.message);
+  const appendedContext = payload.pastedContents
+    .map((content) => content.trim())
+    .filter((content) => content.length > 0)
+    .map((content) => `Pasted context:\n${content}`);
+  const note = [parsed.note, ...appendedContext].filter((segment) => segment.length > 0).join("\n\n");
+  const sourceKind = inferPromptCaptureSourceKind(
+    [payload.message, ...payload.pastedContents].filter(Boolean).join("\n\n"),
+    payload.files,
+    parsed.sourceUrl,
+  );
+  const sourceUrl = parsed.sourceUrl ?? buildSyntheticCaptureUrl(sourceKind);
+  await handleCaptureSubmit({
+    sourceUrl,
+    note,
+    collection: payload.collection,
+    files: payload.files,
+    sourceKind,
+  });
+}
+
 async function handleCaptureDelete(id: string): Promise<void> {
   await fetchJson(`/api/captures/${encodeURIComponent(id)}`, { method: "DELETE" });
   state.captures = state.captures.filter((c) => c.id !== id);
@@ -924,22 +1007,19 @@ async function handleCaptureDelete(id: string): Promise<void> {
   renderCaptureView();
 }
 
-async function handleCaptureSubmit(form: HTMLFormElement): Promise<void> {
-  const urlInput = form.elements.namedItem("sourceUrl") as HTMLInputElement | null;
-  const noteInput = form.elements.namedItem("note") as HTMLTextAreaElement | null;
-  const sourceKindInput = form.elements.namedItem("sourceKind") as HTMLSelectElement | null;
-  const savedReasonInput = form.elements.namedItem("savedReason") as HTMLInputElement | null;
-  const collectionInput = form.elements.namedItem("collection") as HTMLInputElement | null;
-  const projectIdsInput = form.elements.namedItem("projectIds") as HTMLInputElement | null;
-  const fileInput = form.elements.namedItem("assets") as HTMLInputElement | null;
-  if (!urlInput) return;
+async function handleCaptureSubmit(input: {
+  sourceUrl: string;
+  note: string;
+  collection: string | null;
+  files: File[];
+  sourceKind: SourceKind;
+}): Promise<void> {
   state.captureStatus = "saving";
   state.captureError = null;
   renderCaptureView();
   try {
-    const files = Array.from(fileInput?.files ?? []);
     const assets = await Promise.all(
-      files.map(async (file) => ({
+      input.files.map(async (file) => ({
         name: file.name,
         mediaType: file.type || "application/octet-stream",
         dataBase64: await readFileAsDataUrl(file),
@@ -950,21 +1030,18 @@ async function handleCaptureSubmit(form: HTMLFormElement): Promise<void> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        sourceUrl: urlInput.value,
-        note: noteInput?.value ?? "",
-        sourceKind: sourceKindInput?.value ?? "reference",
-        savedReason: savedReasonInput?.value ?? "",
-        collection: collectionInput?.value ?? "",
-        projectIds: (projectIdsInput?.value ?? "")
-          .split(",")
-          .map((value) => value.trim())
-          .filter(Boolean),
+        sourceUrl: input.sourceUrl,
+        note: input.note,
+        sourceKind: input.sourceKind,
+        collection: input.collection ?? "",
+        projectIds: [],
         assets,
       }),
     });
     state.captureResult = result;
     state.captureStatus = "idle";
     state.captureError = null;
+    state.captureCollection = null;
     await refreshData();
     renderCaptureView();
   } catch (error) {
@@ -977,143 +1054,82 @@ async function handleCaptureSubmit(form: HTMLFormElement): Promise<void> {
 function renderReferencesView(): void {
   const container = document.getElementById("view-references");
   if (!container) return;
-  const filters = state.references.filters;
-  const selected = state.references.references.find((reference) => reference.id === state.selectedReferenceId) ?? null;
-  const memoryResults = state.memoryQuery.results;
-  const referenceCount = state.references.references.length;
-  const platformCount = filters.platforms.length;
+  unmountReferenceResults();
+  const hasSearchQuery = state.referenceFilters.q.trim().length > 0;
+  const hasActiveMediaType = state.referenceFilters.mediaType !== "all";
+  const hasVisibleResults = state.view === "references" || hasSearchQuery || hasActiveMediaType;
+  const filteredReferences = state.references.references
+    .filter((reference) => matchesReferenceMediaType(reference, state.referenceFilters.mediaType))
+    .map((reference, index) => ({ reference, layout: getSearchResultLayout(index, reference) }));
   container.innerHTML = `
-    <section class="surface-card">
-      <header class="surface-head">
-        <div>
-          <span class="eyebrow">References</span>
-          <h1>Find the things you half remember by feeling.</h1>
-        </div>
-      </header>
-      <form id="reference-filters" class="filter-bar">
-        ${renderFilterSelect("theme", "Theme", filters.themes, state.referenceFilters.theme)}
-        ${renderFilterSelect("motif", "Motif", filters.motifs, state.referenceFilters.motif)}
-        ${renderFilterSelect("creator", "Creator", filters.creators, state.referenceFilters.creator)}
-        ${renderFilterSelect("format", "Format", filters.formats, state.referenceFilters.format)}
-        ${renderFilterSelect("platform", "Platform", filters.platforms, state.referenceFilters.platform)}
-        <label class="field field-search">
-          <span>Search</span>
-          <input name="q" type="search" value="${escapeAttribute(state.referenceFilters.q)}" placeholder="search title, note, theme" />
-        </label>
-        <div class="form-actions form-actions-inline">
-          <button class="pill-btn pill-btn-solid" type="submit">Apply</button>
-          <button class="pill-btn" type="button" id="references-reset">Reset</button>
-        </div>
-      </form>
-      <div class="workspace-status workspace-status-inline">
-        <span class="workspace-pill workspace-pill-soft">${referenceCount} match${referenceCount === 1 ? "" : "es"}</span>
-        <span class="workspace-pill workspace-pill-soft">${memoryResults.length} derived note${memoryResults.length === 1 ? "" : "s"}</span>
-        <span class="workspace-pill workspace-pill-soft">${platformCount} platform${platformCount === 1 ? "" : "s"}</span>
-      </div>
-    </section>
-
-    <section class="surface-card">
-      <header class="surface-head">
-        <div>
-          <span class="eyebrow">Memory Query</span>
-          <h2>Derived context that matches the current filters</h2>
-        </div>
-      </header>
-      <div class="prompt-list">
-        ${
-          state.referenceStatus === "loading"
-            ? skeletonCards(3)
-            : memoryResults.length > 0
-              ? memoryResults.map((entry) => renderMemoryQueryCard(entry)).join("")
-              : `<p class="empty-copy">No non-reference memory matched this search yet.</p>`
-        }
-      </div>
-    </section>
-
-    <section class="reference-layout">
-      <div class="reference-grid" id="reference-grid">
-        ${
-          state.referenceStatus === "loading"
-            ? skeletonCards(4)
-            : state.references.references.length > 0
-              ? state.references.references.map((reference) => renderReferenceCard(reference, reference.id === selected?.id)).join("")
-              : `<p class="empty-copy">No references match this filter set yet.</p>`
-        }
-      </div>
-      <aside class="surface-card reference-detail">
-        ${
-          selected
-            ? renderReferenceDetail(selected)
-            : `<p class="empty-copy">Choose a reference to inspect its taste signals.</p>`
-        }
-      </aside>
-    </section>
+    ${
+      hasVisibleResults
+        ? `
+          <section class="reference-results-surface">
+            <header class="surface-head surface-head-compact">
+              <div>
+                <span class="eyebrow">Results</span>
+                <h2>${
+                  hasSearchQuery || hasActiveMediaType
+                    ? `${filteredReferences.length} match${filteredReferences.length === 1 ? "" : "es"}${hasActiveMediaType ? ` · ${escapeHtml(getReferenceMediaTypeLabel(state.referenceFilters.mediaType))}` : ""}`
+                    : `${filteredReferences.length} reference${filteredReferences.length === 1 ? "" : "s"} in the archive`
+                }</h2>
+              </div>
+            </header>
+            <div id="reference-results-react-root" class="reference-results-board">
+              ${
+                state.referenceStatus === "loading"
+                  ? skeletonCards(6)
+                  : filteredReferences.length > 0
+                    ? ""
+                    : `
+                      <article class="search-empty-state">
+                        <span class="eyebrow">No results</span>
+                        <h3>Nothing matched that search.</h3>
+                        <p>Try a different phrase, or switch the type chip if you are looking for a video, article, image, quote, or note.</p>
+                      </article>
+                    `
+              }
+            </div>
+          </section>
+        `
+        : ""
+    }
   `;
-
-  const filtersForm = document.getElementById("reference-filters") as HTMLFormElement | null;
-  filtersForm?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const formData = new FormData(filtersForm);
-    state.referenceFilters = {
-      theme: String(formData.get("theme") ?? ""),
-      motif: String(formData.get("motif") ?? ""),
-      creator: String(formData.get("creator") ?? ""),
-      format: String(formData.get("format") ?? ""),
-      platform: String(formData.get("platform") ?? ""),
-      q: String(formData.get("q") ?? ""),
+  if (!hasVisibleResults || state.referenceStatus === "loading" || filteredReferences.length === 0) return;
+  const rootNode = document.getElementById("reference-results-react-root");
+  if (!rootNode) return;
+  const items: SearchReferenceCardItem[] = filteredReferences.map(({ reference, layout }) => {
+    const mediaType = classifyReferenceMediaType(reference);
+    return {
+      id: reference.id,
+      title: reference.title,
+      excerpt: truncateText(reference.summary, layout.colSpan === 2 ? 190 : 132),
+      image: getReferenceCardImage(reference),
+      mediaType,
+      status: getReferenceMediaTypeLabel(mediaType),
+      authorName: reference.platform,
+      date: formatDate(reference.createdAt),
+      readTime: getReferenceCardReadTime(reference),
+      tags: getReferenceCardTags(reference),
+      colSpan: layout.colSpan,
+      rowSpan: layout.rowSpan,
+      hasPersistentHover: layout.hasPersistentHover,
+      onOpen: () => {
+        void navigate("studio", { page: reference.pagePath });
+      },
+      onAction: () => {
+        state.ideaForm.referenceIds = Array.from(new Set([reference.id, ...state.ideaForm.referenceIds])).slice(0, 4);
+        if (!state.ideaForm.brief.trim()) {
+          state.ideaForm.brief = reference.summary;
+        }
+        renderIdeasView();
+        void navigate("ideas");
+      },
     };
-    void refreshReferences();
   });
-  document.getElementById("references-reset")?.addEventListener("click", () => {
-    state.referenceFilters = { theme: "", motif: "", creator: "", format: "", platform: "", q: "" };
-    void refreshReferences();
-  });
-  container.querySelectorAll<HTMLButtonElement>("[data-reference-id]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const id = button.getAttribute("data-reference-id");
-      if (!id) return;
-      state.selectedReferenceId = id;
-      renderReferencesView();
-    });
-  });
-  container.querySelectorAll<HTMLButtonElement>("[data-query-source-ids]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const ids = (button.getAttribute("data-query-source-ids") ?? "")
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean);
-      const summary = button.getAttribute("data-query-summary") ?? "";
-      if (ids.length === 0) return;
-      state.ideaForm.referenceIds = ids.slice(0, 4);
-      if (!state.ideaForm.brief.trim()) {
-        state.ideaForm.brief = summary;
-      }
-      renderIdeasView();
-      void navigate("ideas");
-    });
-  });
-  container.querySelectorAll<HTMLButtonElement>("[data-query-open-page]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const page = button.getAttribute("data-query-open-page");
-      if (!page) return;
-      void navigate("studio", { page });
-    });
-  });
-  document.getElementById("reference-use-idea")?.addEventListener("click", () => {
-    if (!selected) return;
-    state.ideaForm.referenceIds = Array.from(new Set([selected.id, ...state.ideaForm.referenceIds])).slice(0, 4);
-    state.ideaForm.brief = selected.summary;
-    renderIdeasView();
-    void navigate("ideas");
-  });
-  document.getElementById("reference-rerun-analysis")?.addEventListener("click", () => {
-    if (!selected) return;
-    void rerunAnalysis(selected.id);
-  });
-  document.getElementById("reference-open-studio")?.addEventListener("click", () => {
-    if (!selected) return;
-    void navigate("studio", { page: selected.pagePath });
-  });
+  referenceResultsRoot = createRoot(rootNode);
+  referenceResultsRoot.render(createElement(ReferenceSearchResults, { items }));
 }
 
 async function rerunAnalysis(referenceId: string): Promise<void> {
@@ -1448,7 +1464,7 @@ function renderIdeasView(): void {
       if (!id) return;
       state.selectedReferenceId = id;
       renderReferencesView();
-      void navigate("references");
+      void navigateWithSearchTransition("references");
     });
   });
 }
@@ -1566,6 +1582,24 @@ function updateViewVisibility(): void {
       panel.classList.remove("is-entering");
     }
   });
+  const workspaceShell = document.getElementById("workspace-shell");
+  if (workspaceShell) {
+    workspaceShell.classList.toggle("view-is-home", state.view === "home");
+    workspaceShell.classList.toggle("view-is-capture", state.view === "capture");
+    workspaceShell.classList.toggle("view-is-references", state.view === "references");
+    workspaceShell.classList.toggle("view-is-studio", state.view === "studio");
+    workspaceShell.setAttribute("data-active-view", state.view);
+  }
+  const siteHeader = document.querySelector<HTMLElement>(".site-header");
+  if (siteHeader) {
+    siteHeader.setAttribute("data-active-view", state.view);
+  }
+  const workspaceTopbar = document.querySelector<HTMLElement>(".workspace-topbar");
+  if (workspaceTopbar) {
+    workspaceTopbar.hidden = state.view === "references";
+  }
+  document.body.classList.toggle("capture-no-scroll", state.view === "capture");
+  document.documentElement.classList.toggle("capture-no-scroll", state.view === "capture");
 }
 
 function updateNavState(): void {
@@ -1601,21 +1635,6 @@ function renderCaptureHistory(capture: CaptureRecord): string {
         <button class="history-delete-btn" type="button" data-capture-id="${escapeHtml(capture.id)}" title="Delete capture">×</button>
       </div>
     </article>
-  `;
-}
-
-function renderReferenceCard(reference: ReferenceSummary, isActive: boolean): string {
-  return `
-    <button class="reference-card ${isActive ? "reference-card-active" : ""}" type="button" data-reference-id="${reference.id}">
-      <span class="reference-platform">${escapeHtml(reference.platform)}</span>
-      <strong>${escapeHtml(reference.title)}</strong>
-      <p>${escapeHtml(reference.summary)}</p>
-      <div class="meta-row">
-        <span>${formatDate(reference.createdAt)}</span>
-        <span>${reference.assetCount} asset${reference.assetCount === 1 ? "" : "s"}</span>
-      </div>
-      <div class="signal-cloud signal-cloud-tight">${renderSignalChips(reference.themes.slice(0, 2))}</div>
-    </button>
   `;
 }
 
@@ -1712,21 +1731,25 @@ function renderIdeaSessionSummary(): string {
   `;
 }
 
-function renderMemoryQueryCard(entry: QueryIndexEntry): string {
+function renderMemoryQueryCard(entry: QueryIndexEntry, variant = ""): string {
   if (entry.kind === "moment") {
-    return renderMomentQueryCard(entry);
+    return renderMomentQueryCard(entry, variant);
   }
   const canOpenStudio = entry.path.endsWith(".md");
   const sourceCount = entry.sourceIds.length;
   return `
-    <article class="prompt-card memory-query-card">
-      <span class="reference-platform">${escapeHtml(entry.kind)}</span>
+    <article class="search-result-card search-result-card-memory ${variant}">
+      <div class="search-card-topline">
+        <span class="reference-platform">${escapeHtml(entry.kind)}</span>
+        <span class="search-card-kind">archive</span>
+      </div>
       <strong>${escapeHtml(entry.title)}</strong>
       <p>${escapeHtml(entry.summary)}</p>
       <div class="meta-row">
         <span>${sourceCount} source${sourceCount === 1 ? "" : "s"}</span>
         <span>${entry.dates.updatedAt ? formatDate(entry.dates.updatedAt) : entry.dates.createdAt ? formatDate(entry.dates.createdAt) : "Derived"}</span>
       </div>
+      ${entry.tags.length > 0 ? `<div class="signal-cloud signal-cloud-tight">${entry.tags.slice(0, 4).map((tag) => `<span class="signal-chip">${escapeHtml(tag.replace(/^signal:/, ""))}</span>`).join("")}</div>` : ""}
       <div class="detail-inline-actions">
         ${sourceCount > 0
           ? `<button class="pill-btn pill-btn-solid" type="button" data-query-source-ids="${escapeAttribute(entry.sourceIds.join(","))}" data-query-summary="${escapeAttribute(entry.summary)}">Use sources in ideas</button>`
@@ -1739,15 +1762,18 @@ function renderMemoryQueryCard(entry: QueryIndexEntry): string {
   `;
 }
 
-function renderMomentQueryCard(entry: QueryIndexEntry): string {
+function renderMomentQueryCard(entry: QueryIndexEntry, variant = ""): string {
   const referenceId = entry.sourceIds[0] ?? "";
   const startLabel = entry.momentStartMs != null ? formatMs(entry.momentStartMs) : null;
   const endLabel = entry.momentEndMs != null ? formatMs(entry.momentEndMs) : null;
   const timeRange = startLabel ? (endLabel ? `${startLabel}–${endLabel}` : startLabel) : null;
   const signalSlugs = entry.tags.filter((t) => t.startsWith("signal:")).map((t) => t.slice(7));
   return `
-    <article class="prompt-card memory-query-card memory-query-card-moment">
-      <span class="reference-platform">moment · ${escapeHtml(entry.momentKind ?? "beat")}</span>
+    <article class="search-result-card search-result-card-memory search-result-card-moment ${variant}">
+      <div class="search-card-topline">
+        <span class="reference-platform">moment · ${escapeHtml(entry.momentKind ?? "beat")}</span>
+        <span class="search-card-kind">archive</span>
+      </div>
       <strong>${escapeHtml(entry.title)}</strong>
       ${timeRange ? `<span class="moment-timestamp">${escapeHtml(timeRange)}</span>` : ""}
       <p>${escapeHtml(entry.summary)}</p>
@@ -1781,133 +1807,6 @@ function renderSupportingReferencePills(referenceIds: string[]): string {
           `,
         )
         .join("")}
-    </div>
-  `;
-}
-
-function renderReferenceDetail(reference: ReferenceSummary): string {
-  const relatedReferences = reference.relatedReferenceIds
-    .map((id) => state.catalog.references.find((candidate) => candidate.id === id))
-    .filter((item): item is ReferenceSummary => item != null);
-  return `
-    <header class="surface-head">
-      <div>
-        <span class="eyebrow">${escapeHtml(reference.platform)}</span>
-        <h2>${escapeHtml(reference.title)}</h2>
-      </div>
-      <div class="hero-actions">
-        <button class="pill-btn pill-btn-solid" type="button" id="reference-use-idea">Use in ideas</button>
-        <button class="pill-btn" type="button" id="reference-open-studio">Browse Wiki</button>
-      </div>
-    </header>
-    <p class="lede">${escapeHtml(reference.summary)}</p>
-    <div class="detail-block">
-      <span class="detail-label">Capture context</span>
-      <ul class="detail-list">
-        <li>Source kind: ${escapeHtml(reference.sourceKind)}</li>
-        <li>Saved reason: ${escapeHtml(reference.savedReason ?? "None")}</li>
-        <li>Collection: ${escapeHtml(reference.collection ?? "None")}</li>
-        <li>Project IDs: ${escapeHtml(reference.projectIds.join(", ") || "None")}</li>
-        <li>Analyzed from: ${escapeHtml(describeTranscriptSource(reference.transcriptSource))}</li>
-      </ul>
-    </div>
-    <div class="detail-block">
-      <span class="detail-label">Themes</span>
-      ${renderSignalEvidenceList(reference.themes)}
-    </div>
-    <div class="detail-block">
-      <span class="detail-label">Motifs</span>
-      ${renderSignalEvidenceList(reference.motifs)}
-    </div>
-    <div class="detail-block">
-      <span class="detail-label">Formats</span>
-      ${renderSignalEvidenceList(reference.formatSignals)}
-    </div>
-    <div class="detail-block">
-      <span class="detail-label">Creators</span>
-      ${renderSignalEvidenceList(reference.creatorSignals)}
-    </div>
-    <div class="detail-block">
-      <span class="detail-label">Tone</span>
-      ${renderSignalEvidenceList(reference.toneSignals)}
-    </div>
-    <div class="detail-block">
-      <span class="detail-label">Visual cues</span>
-      ${renderSignalEvidenceList(reference.visualSignals)}
-    </div>
-    <div class="detail-block">
-      <span class="detail-label">Audio cues</span>
-      ${renderSignalEvidenceList(reference.audioSignals)}
-    </div>
-    <div class="detail-block">
-      <span class="detail-label">Pacing</span>
-      ${renderSignalEvidenceList(reference.pacingSignals)}
-    </div>
-    <div class="detail-block">
-      <span class="detail-label">Story moves</span>
-      ${renderSignalEvidenceList(reference.storySignals)}
-    </div>
-    <div class="detail-block">
-      <span class="detail-label">Moments</span>
-      ${
-        reference.moments.length > 0
-          ? `<ul class="detail-list">${reference.moments.map((moment) => `<li><strong>${escapeHtml(moment.label)}:</strong> ${escapeHtml(moment.description)}</li>`).join("")}</ul>`
-          : `<p class="empty-copy">No scene-level moments surfaced yet.</p>`
-      }
-    </div>
-    <div class="detail-block">
-      <span class="detail-label">Related references</span>
-      ${
-        relatedReferences.length > 0
-          ? relatedReferences
-              .map(
-                (related) => `
-                  <button class="reference-inline-pill" type="button" data-reference-id="${related.id}">
-                    ${escapeHtml(related.title)}
-                  </button>
-                `,
-              )
-              .join("")
-          : `<p class="empty-copy">No related trail surfaced yet.</p>`
-      }
-    </div>
-    ${
-      reference.note
-        ? `
-      <div class="detail-block">
-        <span class="detail-label">Saved note</span>
-        <p class="detail-note">${escapeHtml(reference.note)}</p>
-      </div>
-    `
-        : ""
-    }
-    <div class="detail-block">
-      <span class="detail-label">Open questions</span>
-      ${
-        reference.openQuestions.length > 0
-          ? `<ul class="detail-list">${reference.openQuestions.map((question) => `<li>${escapeHtml(question)}</li>`).join("")}</ul>`
-          : `<p class="empty-copy">No explicit uncertainty flagged.</p>`
-      }
-    </div>
-    <div class="detail-block">
-      <span class="detail-label">Tensions</span>
-      ${
-        reference.contradictions.length > 0
-          ? `<ul class="detail-list">${reference.contradictions.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>`
-          : `<p class="empty-copy">No internal contradiction surfaced.</p>`
-      }
-    </div>
-    <div class="detail-block">
-      <span class="detail-label">Provenance</span>
-      <ul class="detail-list">
-        <li>Source IDs: ${escapeHtml(reference.provenance.sourceIds.join(", ") || "None")}</li>
-        <li>Paths: ${escapeHtml(reference.provenance.sourcePaths.join(", ") || "None")}</li>
-        <li>Compiled: ${escapeHtml(formatDateTime(reference.provenance.compiledAt))}</li>
-      </ul>
-    </div>
-    <div class="detail-block detail-inline-actions">
-      <button class="pill-btn pill-btn-muted" type="button" id="reference-rerun-analysis">Re-run local analysis</button>
-      <a class="pill-btn" href="${escapeAttribute(reference.sourceUrl)}" target="_blank" rel="noreferrer">Open source</a>
     </div>
   `;
 }
@@ -2088,29 +1987,87 @@ function renderMiniSignalPills(signals: SignalTag[]): string {
     .join("");
 }
 
-function renderFilterSelect(
-  name: keyof ReferenceFiltersState,
-  label: string,
-  items: Array<{ slug: string; label: string; count: number }>,
-  selected: string,
-): string {
-  return `
-    <label class="field">
-      <span>${label}</span>
-      <select name="${name}">
-        <option value="">All</option>
-        ${items
-          .map(
-            (item) => `
-              <option value="${escapeAttribute(item.slug)}" ${selected === item.slug ? "selected" : ""}>
-                ${escapeHtml(item.label)} (${item.count})
-              </option>
-            `,
-          )
-          .join("")}
-      </select>
-    </label>
-  `;
+function getSearchResultLayout(index: number, reference: ReferenceSummary): SearchResultLayout {
+  const density = reference.title.length + reference.summary.length + reference.note.length;
+  const shouldFeature = (index === 0 || index % 9 === 0) && density > 110;
+  return {
+    colSpan: shouldFeature ? 2 : 1,
+    hasPersistentHover: shouldFeature,
+  };
+}
+
+const REFERENCE_MEDIA_TYPES: Array<{ value: ReferenceSearchMediaType; label: string }> = [
+  { value: "webpages", label: "Web Pages" },
+  { value: "videos", label: "Videos" },
+  { value: "quotes", label: "Quotes" },
+  { value: "x-posts", label: "X Posts" },
+  { value: "images", label: "Images" },
+  { value: "articles", label: "Articles" },
+  { value: "notes", label: "Notes" },
+];
+
+function matchesReferenceMediaType(reference: ReferenceSummary, mediaType: ReferenceSearchMediaType): boolean {
+  if (mediaType === "all") return true;
+  return classifyReferenceMediaType(reference) === mediaType;
+}
+
+function classifyReferenceMediaType(reference: ReferenceSummary): Exclude<ReferenceSearchMediaType, "all"> {
+  const sourceUrl = reference.sourceUrl.toLowerCase();
+  const platform = reference.platform.toLowerCase();
+  const title = reference.title.toLowerCase();
+  const summary = reference.summary.toLowerCase();
+  const note = reference.note.toLowerCase();
+  const formats = reference.formatSignals.map((signal) => signal.label.toLowerCase()).join(" ");
+  const haystack = [sourceUrl, platform, title, summary, note, formats].join(" ");
+  const isMatch = (...needles: string[]): boolean => needles.some((needle) => haystack.includes(needle));
+
+  if (reference.sourceKind === "journal" || reference.sourceKind === "brief" || reference.sourceKind === "voice-note") return "notes";
+  if (isMatch("x.com", "twitter.com", "x post", "tweet")) return "x-posts";
+  if (reference.transcriptSource === "web-article" || isMatch("substack", "medium.com", "article", "essay", "open.substack.com")) return "articles";
+  if (reference.sourceKind === "moodboard" || isMatch("pinterest", "image", "photo", "screenshot")) return "images";
+  if (isMatch("youtube", "youtu.be", "tiktok", "instagram.com/reel", "vimeo", "video", "voiceover montage", "talking head", "pov diary", "tutorial")) return "videos";
+  if (isMatch("quote", "quotation", "aphorism", "favorite line")) return "quotes";
+  return "webpages";
+}
+
+function getReferenceMediaTypeLabel(mediaType: ReferenceSearchMediaType): string {
+  return REFERENCE_MEDIA_TYPES.find((item) => item.value === mediaType)?.label ?? "Web Pages";
+}
+
+function getReferenceCardTags(reference: ReferenceSummary): string[] {
+  return [
+    ...reference.themes.slice(0, 1).map((signal) => signal.label),
+    ...reference.formatSignals.slice(0, 1).map((signal) => signal.label),
+    ...(reference.emotionalTone[0] ? [reference.emotionalTone[0]] : []),
+    ...(reference.collection ? [reference.collection] : []),
+  ]
+    .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index)
+    .slice(0, 3);
+}
+
+function getReferenceCardReadTime(reference: ReferenceSummary): string {
+  const mediaType = classifyReferenceMediaType(reference);
+  if (mediaType === "videos") return reference.assetCount > 0 ? `${reference.assetCount} clips` : "Video";
+  if (mediaType === "images") return reference.assetCount > 0 ? `${reference.assetCount} images` : "Image";
+  if (mediaType === "quotes") return "Quote";
+  if (mediaType === "x-posts") return "X post";
+  if (mediaType === "notes") return reference.sourceKind.replace("-", " ");
+  if (mediaType === "articles") return "Article";
+  return "Web page";
+}
+
+function getReferenceCardImage(reference: ReferenceSummary): string {
+  const mediaType = classifyReferenceMediaType(reference);
+  const images: Record<Exclude<ReferenceSearchMediaType, "all">, string> = {
+    webpages: "https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=1200&q=80",
+    videos: "https://images.unsplash.com/photo-1492691527719-9d1e07e534b4?w=1200&q=80",
+    quotes: "https://images.unsplash.com/photo-1516321318423-f06f85e504b3?w=1200&q=80",
+    "x-posts": "https://images.unsplash.com/photo-1611162616305-c69b3fa7fbe0?w=1200&q=80",
+    images: "https://images.unsplash.com/photo-1513542789411-b6a5d4f31634?w=1200&q=80",
+    articles: "https://images.unsplash.com/photo-1499750310107-5fef28a66643?w=1200&q=80",
+    notes: "https://images.unsplash.com/photo-1455390582262-044cdead277a?w=1200&q=80",
+  };
+  return images[mediaType];
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {

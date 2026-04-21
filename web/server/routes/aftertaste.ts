@@ -16,7 +16,7 @@ import {
   lintWiki,
   listCaptures,
   listProjectBriefs,
-  listReferences,
+  listReferencesSmart,
   planWikiCleanup,
   runAnalysis,
   searchQueryIndex,
@@ -224,10 +224,10 @@ export function handleSnapshotCurrent(cfg: ServerConfig) {
 }
 
 export function handleReferences(cfg: ServerConfig) {
-  return (req: Request, res: Response) => {
+  return async (req: Request, res: Response) => {
     try {
       res.json(
-        listReferences(cfg.wikiRoot, {
+        await listReferencesSmart(cfg.wikiRoot, {
           theme: normalizeQuery(req.query.theme),
           motif: normalizeQuery(req.query.motif),
           creator: normalizeQuery(req.query.creator),
