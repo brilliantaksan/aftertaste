@@ -303,4 +303,8 @@ But the product direction here is now specifically Aftertaste, not a generic wik
 
 ## License
 
-MIT
+Aftertaste is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
+
+You can inspect it, run it locally, and experiment with it for personal, research,
+or other noncommercial use. Commercial use requires a separate license from the
+project owner.
