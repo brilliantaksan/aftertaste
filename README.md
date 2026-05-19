@@ -37,7 +37,12 @@ So the system is designed around:
 
 ## Current State
 
-What exists today:
+This is a working local prototype, not a packaged app. A technical friend should
+be able to run their own instance locally with Node.js and a folder to use as the
+vault, but they should expect rough product edges and optional provider setup if
+they want LLM or richer media behavior.
+
+What works without any API keys:
 
 - A local web app with 5 surfaces:
   - `Home`
@@ -70,6 +75,13 @@ What exists today:
   - audit resolution
 - Obsidian audit plugin still in the repo
 
+What works with optional provider keys:
+
+- OpenAI-compatible LLM calls for richer text analysis and idea planning
+- OpenAI or AssemblyAI transcription for uploaded/source media
+- Gemini media analysis for byte-backed video captures
+- A private cobalt instance for fetching source media bytes from supported URLs
+
 What is still intentionally incomplete:
 
 - no hosted sync
@@ -77,8 +89,9 @@ What is still intentionally incomplete:
 - no billing
 - no Instagram Saved auto-sync
 - no mobile shell
-- no real LLM-backed idea generation yet
-- no production-grade multimodal video understanding provider integrated yet
+- no one-click installer or packaged desktop app
+- no production-grade provider setup wizard
+- no fully polished mobile-first capture flow
 
 ## How It Works
 
@@ -108,12 +121,18 @@ aftertaste/
 │   ├── client/              # SPA shell and Studio UI
 │   ├── server/              # Express APIs, vault services, markdown rendering
 │   └── shared/              # Client/server contracts
-└── local-vault/             # Example local vault used during development
+└── ops/                     # Optional local/private service scaffolds
 ```
 
-## Running It
+## Quick Start
 
-### 1. Install dependencies
+Prerequisites:
+
+- Node.js 20+
+- npm
+- a local folder to use as the Aftertaste vault
+
+From a fresh clone, install dependencies:
 
 ```bash
 cd audit-shared
@@ -124,27 +143,12 @@ cd ../web
 npm install
 ```
 
-### 2. Start the app against a real vault directory
-
-If you want to use the included local dev vault:
+Create an empty vault folder, then start the app:
 
 ```bash
-cd /Users/brilliantaksan/Developer/aftertaste/web
-npm start -- --wiki /Users/brilliantaksan/Developer/aftertaste/local-vault --port 4175
+mkdir -p ../aftertaste-vault
+npm run dev -- --wiki ../aftertaste-vault --port 4175
 ```
-
-Or point it at any other existing directory:
-
-```bash
-cd web
-npm start -- --wiki "/absolute/path/to/your/vault" --port 4175
-```
-
-Important:
-
-- `--wiki` must point to a real directory
-- if the directory is empty, Aftertaste scaffolds the vault structure for you
-- if the directory does not exist, the server exits with an error
 
 Then open:
 
@@ -152,9 +156,37 @@ Then open:
 http://127.0.0.1:4175
 ```
 
-## Optional: Private cobalt API
+Important:
 
-If you want Aftertaste to acquire source media bytes from supported public URLs, a private `cobalt` deployment scaffold now lives in [ops/cobalt/README.md](/Users/brilliantaksan/Developer/aftertaste/ops/cobalt/README.md).
+- `--wiki` must point to a real directory
+- if the directory is empty, Aftertaste scaffolds the vault structure for you
+- if the directory does not exist, the server exits with an error
+- the server is local-only by default because it binds to `127.0.0.1`
+
+For a production-style local run, build the client and start the server:
+
+```bash
+npm start -- --wiki ../aftertaste-vault --port 4175
+```
+
+## Optional Provider Setup
+
+Aftertaste runs without provider keys. In that mode it uses heuristic/local
+analysis and still writes a real file-backed vault.
+
+To try provider-backed paths, copy the example environment file from the repo
+root and fill in only the providers you want:
+
+```bash
+cd ..
+cp .env.example .env
+```
+
+The `web` scripts load the repo-root `.env` automatically.
+
+### Private cobalt API
+
+If you want Aftertaste to acquire source media bytes from supported public URLs, a private `cobalt` deployment scaffold now lives in [ops/cobalt/README.md](ops/cobalt/README.md).
 
 ## First Test Flow
 
