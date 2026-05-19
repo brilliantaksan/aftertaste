@@ -10,6 +10,10 @@ export type AnalysisMode = "text-first" | "hybrid";
 
 export type IdeaOutputType = "hooks" | "script" | "shotlist";
 
+export type DiscoverySessionStatus = "active" | "reported";
+
+export type DiscoveryReactionVote = "like" | "dislike" | "save" | "not-this";
+
 export type TranscriptArtifactStatus = "ok" | "unavailable" | "error";
 
 export type TranscriptArtifactSource =
@@ -50,9 +54,12 @@ export type CaptureAcquisitionCoverage =
 export type CaptureAcquisitionProvider =
   | "meta"
   | "apify"
+  | "cobalt"
   | "manual"
   | "local-upload"
   | "unknown";
+
+export type CaptureAssetOrigin = "user-upload" | "source-download";
 
 export type MediaAnalysisArtifactStatus = "ok" | "unavailable" | "error";
 
@@ -159,6 +166,7 @@ export interface CaptureAsset {
   size: number;
   path: string;
   kind: "image" | "video" | "audio" | "document" | "other";
+  origin?: CaptureAssetOrigin;
 }
 
 export interface UrlMetadata {
@@ -486,6 +494,11 @@ export interface ReferencesResponse {
 export interface RelatedReferencesResponse {
   referenceId: string;
   related: ReferenceSummary[];
+  relationDetails?: Array<{
+    reference: ReferenceSummary;
+    reason: string;
+    relationKinds: string[];
+  }>;
   catalysts: CatalystRecord[];
 }
 
@@ -540,6 +553,7 @@ export interface WikiArticleDetail {
   backlinks: WikiArticleLink[];
   relatedPaths: WikiArticleLink[];
   supportingReferenceIds: string[];
+  supportingReferences: Array<WikiArticleLink & { id: string }>;
   tensions: string[];
   openQuestions: string[];
   lastCompiledAt: string | null;
@@ -586,6 +600,7 @@ export interface TasteGraphEvidence {
   referenceIds: string[];
   catalystIds: string[];
   explanation: string | null;
+  relationKinds?: string[];
 }
 
 export interface TasteGraphNode {
@@ -733,4 +748,83 @@ export interface BriefCreateRequest {
   audience?: string;
   constraints?: string[];
   selectedReferenceIds?: string[];
+}
+
+export interface DiscoveryItemInput {
+  referenceId?: string | null;
+  sourceUrl?: string | null;
+  title?: string | null;
+  platform?: string | null;
+  tags?: string[];
+  asset?: CaptureAssetInput | null;
+}
+
+export interface DiscoveryItem {
+  id: string;
+  referenceId: string | null;
+  sourceUrl: string | null;
+  title: string;
+  platform: string;
+  thumbnailLabel: string | null;
+  thumbnailAssetId: string | null;
+  asset: CaptureAsset | null;
+  tags: string[];
+}
+
+export interface DiscoveryReaction {
+  id: string;
+  itemId: string;
+  vote: DiscoveryReactionVote;
+  intensity: number;
+  note: string;
+  createdAt: string;
+}
+
+export interface DiscoverySessionRecord {
+  id: string;
+  title: string;
+  clientName: string;
+  campaignGoal: string;
+  prompt: string;
+  durationTargetMinutes: number;
+  status: DiscoverySessionStatus;
+  items: DiscoveryItem[];
+  reactions: DiscoveryReaction[];
+  reportId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DiscoveryReport {
+  id: string;
+  sessionId: string;
+  summary: string;
+  likedPatterns: string[];
+  rejectedPatterns: string[];
+  tensions: string[];
+  openQuestions: string[];
+  recommendedDirections: string[];
+  citedItemIds: string[];
+  generatedAt: string;
+}
+
+export interface DiscoverySessionCreateRequest {
+  title: string;
+  clientName?: string;
+  campaignGoal: string;
+  prompt?: string;
+  durationTargetMinutes?: number;
+  items?: DiscoveryItemInput[];
+}
+
+export interface DiscoveryReactionRequest {
+  itemId: string;
+  vote: DiscoveryReactionVote;
+  intensity?: number;
+  note?: string;
+}
+
+export interface DiscoverySessionResponse {
+  session: DiscoverySessionRecord;
+  report: DiscoveryReport | null;
 }

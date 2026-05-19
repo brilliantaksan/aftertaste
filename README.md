@@ -152,6 +152,10 @@ Then open:
 http://127.0.0.1:4175
 ```
 
+## Optional: Private cobalt API
+
+If you want Aftertaste to acquire source media bytes from supported public URLs, a private `cobalt` deployment scaffold now lives in [ops/cobalt/README.md](/Users/brilliantaksan/Developer/aftertaste/ops/cobalt/README.md).
+
 ## First Test Flow
 
 To test the MVP manually:

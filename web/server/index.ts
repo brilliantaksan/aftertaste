@@ -17,6 +17,10 @@ import {
   handleCaptureDetail,
   handleCaptureList,
   handleCompile,
+  handleDiscoveryReactionCreate,
+  handleDiscoveryReportCreate,
+  handleDiscoverySessionCreate,
+  handleDiscoverySessionDetail,
   handleIdeas,
   handleQueryIndex,
   handleRelatedReferences,
@@ -54,6 +58,10 @@ app.get("/api/briefs", handleBriefList(cfg));
 app.get("/api/briefs/:id", handleBriefDetail(cfg));
 app.post("/api/briefs", handleBriefCreate(cfg));
 app.post("/api/ideas", handleIdeas(cfg));
+app.post("/api/discovery/sessions", handleDiscoverySessionCreate(cfg));
+app.get("/api/discovery/sessions/:id", handleDiscoverySessionDetail(cfg));
+app.post("/api/discovery/sessions/:id/reactions", handleDiscoveryReactionCreate(cfg));
+app.post("/api/discovery/sessions/:id/report", handleDiscoveryReportCreate(cfg));
 app.get("/api/tree", handleTree(cfg));
 app.get("/api/graph", handleGraph(cfg));
 app.get("/api/graph/taste", handleTasteGraph(cfg));

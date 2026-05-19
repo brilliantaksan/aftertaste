@@ -3,12 +3,17 @@ import type {
   CaptureDetailResponse,
   CaptureListResponse,
   CaptureRecord,
+  DiscoveryReactionVote,
+  DiscoveryReport,
+  DiscoverySessionRecord,
+  DiscoverySessionResponse,
   IdeaOutputType,
   IdeaResponse,
   PersonalMoment,
   ProjectBrief,
   QueryIndexEntry,
   QuerySearchResponse,
+  RelatedReferencesResponse,
   ReferenceMoment,
   ReferenceSummary,
   ReferencesResponse,
@@ -24,9 +29,10 @@ import { ReferenceSearchResults, type SearchReferenceCardItem } from "./componen
 import { mountHomeView } from "./home/index.js";
 import { initButtonMotion } from "./lib/button-motion.js";
 import { initCardMotion } from "./lib/card-motion.js";
+import { applyReveal } from "./lib/reveal.js";
 import { PromptInputBox, type PromptSendPayload } from "./components/ui/ai-prompt-box.js";
 
-type ViewName = "home" | "capture" | "references" | "ideas" | "studio";
+type ViewName = "home" | "capture" | "discovery" | "references" | "ideas" | "studio";
 type ReferenceSearchMediaType = "all" | "webpages" | "videos" | "quotes" | "x-posts" | "images" | "articles" | "notes";
 
 interface AppConfig {
@@ -57,6 +63,18 @@ interface BriefFormState {
   constraints: string;
 }
 
+interface DiscoveryFormState {
+  title: string;
+  clientName: string;
+  campaignGoal: string;
+  prompt: string;
+  durationTargetMinutes: number;
+  referenceIds: string[];
+  customUrl: string;
+  customTitle: string;
+  customTags: string;
+}
+
 interface SearchResultLayout {
   colSpan?: number;
   rowSpan?: number;
@@ -73,11 +91,14 @@ interface AppState {
   references: ReferencesResponse;
   referenceFilters: ReferenceFiltersState;
   selectedReferenceId: string | null;
+  relatedReferenceContext: RelatedReferencesResponse | null;
+  relatedReferenceStatus: "idle" | "loading";
   memoryQuery: QuerySearchResponse;
   captureResult: CaptureDetailResponse | null;
   captureStatus: "idle" | "saving";
   captureError: string | null;
   captureCollection: string | null;
+  deletingCaptureIds: Set<string>;
   ideaForm: IdeaFormState;
   briefs: ProjectBrief[];
   briefForm: BriefFormState;
@@ -85,6 +106,12 @@ interface AppState {
   briefError: string | null;
   ideas: IdeaResponse | null;
   ideaStatus: "idle" | "generating";
+  discoveryForm: DiscoveryFormState;
+  discoverySession: DiscoverySessionRecord | null;
+  discoveryReport: DiscoveryReport | null;
+  discoveryStatus: "idle" | "creating" | "reacting" | "reporting";
+  discoveryError: string | null;
+  discoveryActiveIndex: number;
   referenceStatus: "idle" | "loading";
 }
 
@@ -112,6 +139,8 @@ const state: AppState = {
     q: "",
   },
   selectedReferenceId: null,
+  relatedReferenceContext: null,
+  relatedReferenceStatus: "idle",
   memoryQuery: {
     results: [],
   },
@@ -119,6 +148,7 @@ const state: AppState = {
   captureStatus: "idle",
   captureError: null,
   captureCollection: null,
+  deletingCaptureIds: new Set(),
   ideaForm: {
     outputType: "script",
     brief: "",
@@ -138,6 +168,22 @@ const state: AppState = {
   briefError: null,
   ideas: null,
   ideaStatus: "idle",
+  discoveryForm: {
+    title: "",
+    clientName: "",
+    campaignGoal: "",
+    prompt: "Is this what you want from the agency?",
+    durationTargetMinutes: 20,
+    referenceIds: [],
+    customUrl: "",
+    customTitle: "",
+    customTags: "",
+  },
+  discoverySession: null,
+  discoveryReport: null,
+  discoveryStatus: "idle",
+  discoveryError: null,
+  discoveryActiveIndex: 0,
   referenceStatus: "idle",
 };
 
@@ -149,6 +195,10 @@ const viewChrome: Record<ViewName, { title: string; meta: string }> = {
   capture: {
     title: "Capture Desk",
     meta: "Get new material into the vault fast, then let analysis do the slow work later.",
+  },
+  discovery: {
+    title: "Client Discovery",
+    meta: "Let a client react to curated references before the call, then turn the session into a cited taste brief.",
   },
   references: {
     title: "Search Archive",
@@ -232,8 +282,35 @@ async function refreshReferences(): Promise<void> {
     state.selectedReferenceId = state.references.references[0]?.id ?? null;
   }
   state.referenceStatus = "idle";
+  void ensureRelatedReferenceContext(state.selectedReferenceId);
   renderReferencesView();
   renderIdeasView();
+}
+
+async function ensureRelatedReferenceContext(referenceId: string | null): Promise<void> {
+  if (!referenceId) {
+    state.relatedReferenceContext = null;
+    state.relatedReferenceStatus = "idle";
+    renderReferencesView();
+    return;
+  }
+  if (state.relatedReferenceContext?.referenceId === referenceId) return;
+  state.relatedReferenceStatus = "loading";
+  renderReferencesView();
+  try {
+    state.relatedReferenceContext = await fetchJson<RelatedReferencesResponse>(`/api/references/${encodeURIComponent(referenceId)}/related`);
+  } catch {
+    state.relatedReferenceContext = null;
+  } finally {
+    state.relatedReferenceStatus = "idle";
+    renderReferencesView();
+  }
+}
+
+function inspectReference(referenceId: string): void {
+  state.selectedReferenceId = referenceId;
+  void ensureRelatedReferenceContext(referenceId);
+  renderReferencesView();
 }
 
 function bindGlobalNavigation(): void {
@@ -253,6 +330,7 @@ async function syncFromLocation(): Promise<void> {
   const view = viewParam ?? (url.searchParams.has("page") ? "studio" : "home");
   state.view = view;
   state.studioPage = page;
+  renderDiscoveryView();
   renderReferencesView();
   updateViewVisibility();
   updateNavState();
@@ -311,6 +389,7 @@ async function navigate(view: ViewName, extras?: { page?: string; replace?: bool
   const url = buildViewUrl(view, extras?.page ?? state.studioPage);
   if (extras?.replace) history.replaceState({ view, page: state.studioPage }, "", url);
   else history.pushState({ view, page: state.studioPage }, "", url);
+  renderDiscoveryView();
   renderReferencesView();
   updateViewVisibility();
   updateNavState();
@@ -329,6 +408,7 @@ function renderAll(): void {
   renderHeader();
   // Home view is handled by React (mounts into #view-home)
   renderCaptureView();
+  renderDiscoveryView();
   renderReferencesView();
   renderIdeasView();
   updateViewVisibility();
@@ -814,8 +894,7 @@ function renderHomeView(): void {
     button.addEventListener("click", () => {
       const id = button.getAttribute("data-open-reference");
       if (!id) return;
-      state.selectedReferenceId = id;
-      renderReferencesView();
+      inspectReference(id);
       void navigateWithSearchTransition("references");
     });
   });
@@ -894,6 +973,7 @@ function renderCaptureView(): void {
   if (!container) return;
   unmountCapturePrompt();
   const result = state.captureResult;
+  const recentCaptures = state.captures.slice(0, 6);
   const collectionOptions = getCaptureCollectionOptions();
   container.innerHTML = `
     <section class="capture-landing">
@@ -909,25 +989,31 @@ function renderCaptureView(): void {
           <button class="pill-btn" type="button" id="capture-compile">Rebuild vault</button>
         </div>
         ${
-          result
+          recentCaptures.length > 0
             ? `
-              <section class="surface-card success-panel capture-success-panel capture-success-inline">
-                <header class="surface-head">
+              <section class="surface-card capture-success-panel capture-sidecard-compact capture-history-surface">
+                <div class="capture-history-head">
                   <div>
-                    <span class="eyebrow">Captured</span>
-                    <h2>${escapeHtml(result.reference?.title ?? result.capture.metadata.title ?? "New reference added")}</h2>
+                    <span class="eyebrow">${result ? "Captured" : "Recent captures"}</span>
+                    <h2>Clean capture history</h2>
                   </div>
-                </header>
-                <p>${escapeHtml(result.analysis?.summary ?? "The capture was saved and folded back into the archive.")}</p>
-                <div class="signal-cloud signal-cloud-tight">
-                  <span class="signal-chip">${escapeHtml(result.capture.sourceKind)}</span>
-                  <span class="signal-chip">${escapeHtml(result.capture.acquisitionCoverage ?? "url-only")}</span>
-                  ${result.capture.collection ? `<span class="signal-chip">${escapeHtml(result.capture.collection)}</span>` : ""}
+                  ${result ? `<p class="capture-history-note">Latest capture is saved and ready to use in ideas.</p>` : ""}
                 </div>
-                <div class="hero-actions">
-                  <button class="pill-btn pill-btn-solid" id="capture-view-home">See snapshot</button>
-                  <button class="pill-btn" id="capture-open-ideas">Use this in ideas</button>
+                <div class="capture-history capture-history-compact">
+                  ${recentCaptures
+                    .map((capture) => renderCaptureHistory(capture, { isLatest: capture.id === result?.capture.id }))
+                    .join("")}
                 </div>
+                ${
+                  result
+                    ? `
+                      <div class="hero-actions capture-actions-minimal">
+                        <button class="pill-btn pill-btn-solid" id="capture-view-home">See snapshot</button>
+                        <button class="pill-btn" id="capture-open-ideas">Use this in ideas</button>
+                      </div>
+                    `
+                    : ""
+                }
               </section>
             `
             : ""
@@ -969,13 +1055,29 @@ function renderCaptureView(): void {
     }
     void navigateWithSearchTransition("ideas");
   });
-  document.getElementById("view-capture")?.addEventListener("click", (event) => {
-    const btn = (event.target as HTMLElement).closest<HTMLButtonElement>(".history-delete-btn");
-    if (!btn) return;
-    const id = btn.dataset.captureId;
-    if (!id) return;
-    void handleCaptureDelete(id);
-  });
+  container.onclick = (event) => {
+    const target = event.target as HTMLElement;
+    const deleteButton = target.closest<HTMLButtonElement>(".history-delete-btn");
+    if (deleteButton) {
+      const id = deleteButton.dataset.captureId;
+      if (!id) return;
+      void handleCaptureDelete(id);
+      return;
+    }
+    const card = target.closest<HTMLElement>(".history-card[data-history-open-page]");
+    const pagePath = card?.dataset.historyOpenPage;
+    if (!pagePath) return;
+    void navigate("studio", { page: pagePath });
+  };
+  container.onkeydown = (event) => {
+    const target = event.target as HTMLElement;
+    const card = target.closest<HTMLElement>(".history-card[data-history-open-page]");
+    const pagePath = card?.dataset.historyOpenPage;
+    if (!pagePath || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    void navigate("studio", { page: pagePath });
+  };
+  if (state.view === "capture") applyReveal(container);
 }
 
 async function handlePromptCaptureSubmit(payload: PromptSendPayload): Promise<void> {
@@ -1001,10 +1103,29 @@ async function handlePromptCaptureSubmit(payload: PromptSendPayload): Promise<vo
 }
 
 async function handleCaptureDelete(id: string): Promise<void> {
-  await fetchJson(`/api/captures/${encodeURIComponent(id)}`, { method: "DELETE" });
-  state.captures = state.captures.filter((c) => c.id !== id);
-  if (state.captureResult?.capture.id === id) state.captureResult = null;
-  renderCaptureView();
+  if (state.deletingCaptureIds.has(id)) return;
+  const reference = state.catalog.references.find((item) => item.id === id) ?? state.references.references.find((item) => item.id === id) ?? null;
+  const title = reference?.title ?? state.captures.find((capture) => capture.id === id)?.metadata.title ?? "this capture";
+  const confirmed = window.confirm(`Delete "${title}" from the vault? This removes its raw capture, media artifacts, and compiled wiki reference.`);
+  if (!confirmed) return;
+
+  state.deletingCaptureIds.add(id);
+  try {
+    await fetchJson(`/api/captures/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (state.captureResult?.capture.id === id) state.captureResult = null;
+    state.ideaForm.referenceIds = state.ideaForm.referenceIds.filter((referenceId) => referenceId !== id);
+    state.discoveryForm.referenceIds = state.discoveryForm.referenceIds.filter((referenceId) => referenceId !== id);
+    if (state.selectedReferenceId === id) {
+      state.selectedReferenceId = null;
+      state.relatedReferenceContext = null;
+    }
+    await refreshData();
+  } catch (error) {
+    state.captureError = error instanceof Error ? error.message : String(error);
+    renderAll();
+  } finally {
+    state.deletingCaptureIds.delete(id);
+  }
 }
 
 async function handleCaptureSubmit(input: {
@@ -1061,42 +1182,53 @@ function renderReferencesView(): void {
   const filteredReferences = state.references.references
     .filter((reference) => matchesReferenceMediaType(reference, state.referenceFilters.mediaType))
     .map((reference, index) => ({ reference, layout: getSearchResultLayout(index, reference) }));
+  const selectedReference = state.references.references.find((reference) => reference.id === state.selectedReferenceId) ?? null;
+  const relationContext = state.relatedReferenceContext?.referenceId === selectedReference?.id ? state.relatedReferenceContext : null;
   container.innerHTML = `
     ${
       hasVisibleResults
         ? `
-          <section class="reference-results-surface">
-            <header class="surface-head surface-head-compact">
-              <div>
-                <span class="eyebrow">Results</span>
-                <h2>${
-                  hasSearchQuery || hasActiveMediaType
-                    ? `${filteredReferences.length} match${filteredReferences.length === 1 ? "" : "es"}${hasActiveMediaType ? ` · ${escapeHtml(getReferenceMediaTypeLabel(state.referenceFilters.mediaType))}` : ""}`
-                    : `${filteredReferences.length} reference${filteredReferences.length === 1 ? "" : "s"} in the archive`
-                }</h2>
+          <section class="reference-results-shell">
+            <section class="reference-results-surface">
+              <header class="surface-head surface-head-compact">
+                <div>
+                  <span class="eyebrow">Results</span>
+                  <h2>${
+                    hasSearchQuery || hasActiveMediaType
+                      ? `${filteredReferences.length} match${filteredReferences.length === 1 ? "" : "es"}${hasActiveMediaType ? ` · ${escapeHtml(getReferenceMediaTypeLabel(state.referenceFilters.mediaType))}` : ""}`
+                      : `${filteredReferences.length} reference${filteredReferences.length === 1 ? "" : "s"} in the archive`
+                  }</h2>
+                </div>
+              </header>
+              <div id="reference-results-react-root" class="reference-results-board">
+                ${
+                  state.referenceStatus === "loading"
+                    ? skeletonCards(6)
+                    : filteredReferences.length > 0
+                      ? ""
+                      : `
+                        <article class="search-empty-state">
+                          <span class="eyebrow">No results</span>
+                          <h3>Nothing matched that search.</h3>
+                          <p>Try a different phrase, or switch the type chip if you are looking for a video, article, image, quote, or note.</p>
+                        </article>
+                      `
+                }
               </div>
-            </header>
-            <div id="reference-results-react-root" class="reference-results-board">
-              ${
-                state.referenceStatus === "loading"
-                  ? skeletonCards(6)
-                  : filteredReferences.length > 0
-                    ? ""
-                    : `
-                      <article class="search-empty-state">
-                        <span class="eyebrow">No results</span>
-                        <h3>Nothing matched that search.</h3>
-                        <p>Try a different phrase, or switch the type chip if you are looking for a video, article, image, quote, or note.</p>
-                      </article>
-                    `
-              }
-            </div>
+            </section>
+            <aside class="reference-relationship-panel">
+              ${renderReferenceRelationshipPanel(selectedReference, relationContext)}
+            </aside>
           </section>
         `
         : ""
     }
   `;
-  if (!hasVisibleResults || state.referenceStatus === "loading" || filteredReferences.length === 0) return;
+  if (!hasVisibleResults) return;
+  if (state.referenceStatus === "loading" || filteredReferences.length === 0) {
+    if (state.view === "references") applyReveal(container);
+    return;
+  }
   const rootNode = document.getElementById("reference-results-react-root");
   if (!rootNode) return;
   const items: SearchReferenceCardItem[] = filteredReferences.map(({ reference, layout }) => {
@@ -1114,11 +1246,14 @@ function renderReferencesView(): void {
       tags: getReferenceCardTags(reference),
       colSpan: layout.colSpan,
       rowSpan: layout.rowSpan,
-      hasPersistentHover: layout.hasPersistentHover,
+      hasPersistentHover: layout.hasPersistentHover || reference.id === state.selectedReferenceId,
+      cta: "Inspect connections",
+      actionLabel: state.deletingCaptureIds.has(reference.id) ? "Deleting..." : "Use in ideas",
       onOpen: () => {
-        void navigate("studio", { page: reference.pagePath });
+        inspectReference(reference.id);
       },
       onAction: () => {
+        if (state.deletingCaptureIds.has(reference.id)) return;
         state.ideaForm.referenceIds = Array.from(new Set([reference.id, ...state.ideaForm.referenceIds])).slice(0, 4);
         if (!state.ideaForm.brief.trim()) {
           state.ideaForm.brief = reference.summary;
@@ -1126,10 +1261,343 @@ function renderReferencesView(): void {
         renderIdeasView();
         void navigate("ideas");
       },
+      onDelete: () => {
+        void handleCaptureDelete(reference.id);
+      },
     };
   });
   referenceResultsRoot = createRoot(rootNode);
   referenceResultsRoot.render(createElement(ReferenceSearchResults, { items }));
+  if (state.view === "references") {
+    window.requestAnimationFrame(() => applyReveal(container));
+  }
+  container.querySelectorAll<HTMLButtonElement>("[data-relationship-open-page]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const page = button.getAttribute("data-relationship-open-page");
+      if (!page) return;
+      void navigate("studio", { page });
+    });
+  });
+  container.querySelectorAll<HTMLButtonElement>("[data-related-reference-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = button.getAttribute("data-related-reference-id");
+      if (!id) return;
+      inspectReference(id);
+    });
+  });
+}
+
+function renderDiscoveryView(): void {
+  const container = document.getElementById("view-discovery");
+  if (!container) return;
+  const session = state.discoverySession;
+  const report = state.discoveryReport;
+  const references = getDiscoveryReferenceOptions();
+  const activeItem = session?.items[state.discoveryActiveIndex] ?? null;
+  const progress = session ? `${Math.min(session.reactions.length, session.items.length)} / ${session.items.length}` : "0 / 0";
+  container.innerHTML = `
+    <section class="discovery-layout">
+      <aside class="surface-card discovery-builder">
+        <header class="surface-head">
+          <div>
+            <span class="eyebrow">Client Discovery</span>
+            <h1>Turn pre-call taste into a cited brief.</h1>
+          </div>
+        </header>
+        <p class="lede">Create a focused swipe session from curated references and pasted URLs. The report stays grounded in what the client actually reacted to.</p>
+        <form id="discovery-form" class="ideas-form">
+          <label class="field">
+            <span>Session title</span>
+            <input name="title" type="text" value="${escapeAttribute(state.discoveryForm.title)}" placeholder="Spring launch discovery" />
+          </label>
+          <label class="field">
+            <span>Client / company</span>
+            <input name="clientName" type="text" value="${escapeAttribute(state.discoveryForm.clientName)}" placeholder="Acme Studio" />
+          </label>
+          <label class="field">
+            <span>Campaign goal</span>
+            <textarea name="campaignGoal" rows="4" placeholder="What this call needs to clarify.">${escapeHtml(state.discoveryForm.campaignGoal)}</textarea>
+          </label>
+          <div class="brief-form-grid">
+            <label class="field">
+              <span>Prompt</span>
+              <input name="prompt" type="text" value="${escapeAttribute(state.discoveryForm.prompt)}" />
+            </label>
+            <label class="field">
+              <span>Minutes</span>
+              <input name="durationTargetMinutes" type="number" min="5" max="60" value="${state.discoveryForm.durationTargetMinutes}" />
+            </label>
+          </div>
+          <fieldset class="reference-picks discovery-picks">
+            <legend>Curated references</legend>
+            ${
+              references.length > 0
+                ? references
+                    .map(
+                      (reference) => `
+                        <label class="reference-check">
+                          <input type="checkbox" name="referenceIds" value="${reference.id}" ${state.discoveryForm.referenceIds.includes(reference.id) ? "checked" : ""} />
+                          <span>
+                            <strong>${escapeHtml(reference.title)}</strong>
+                            <small>${escapeHtml(reference.summary)}</small>
+                          </span>
+                        </label>
+                      `,
+                    )
+                    .join("")
+                : `<p class="empty-copy">Capture references first, or add a pasted URL below.</p>`
+            }
+          </fieldset>
+          <div class="discovery-url-grid">
+            <label class="field">
+              <span>Pasted URL</span>
+              <input name="customUrl" type="url" value="${escapeAttribute(state.discoveryForm.customUrl)}" placeholder="https://example.com/reference" />
+            </label>
+            <label class="field">
+              <span>Title</span>
+              <input name="customTitle" type="text" value="${escapeAttribute(state.discoveryForm.customTitle)}" placeholder="Optional reference title" />
+            </label>
+          </div>
+          <label class="field">
+            <span>URL tags</span>
+            <input name="customTags" type="text" value="${escapeAttribute(state.discoveryForm.customTags)}" placeholder="comma-separated taste cues" />
+          </label>
+          ${state.discoveryError ? `<p class="inline-error">${escapeHtml(state.discoveryError)}</p>` : ""}
+          <div class="form-actions">
+            <button class="pill-btn pill-btn-solid" type="submit" ${state.discoveryStatus === "creating" ? "disabled" : ""}>
+              ${state.discoveryStatus === "creating" ? "Creating..." : "Start session"}
+            </button>
+          </div>
+        </form>
+      </aside>
+
+      <div class="discovery-main">
+        <article class="surface-card discovery-session-panel">
+          <header class="surface-head">
+            <div>
+              <span class="eyebrow">Reaction Session</span>
+              <h2>${session ? escapeHtml(session.title) : "No active session yet"}</h2>
+            </div>
+            <span class="workspace-pill workspace-pill-soft">${escapeHtml(progress)} reacted</span>
+          </header>
+          ${
+            session && activeItem
+              ? renderDiscoveryActiveCard(session, activeItem)
+              : `<p class="empty-copy">Build a session from curated references, then react through each card with the client.</p>`
+          }
+        </article>
+
+        <article class="surface-card discovery-report-panel">
+          <header class="surface-head">
+            <div>
+              <span class="eyebrow">Report</span>
+              <h2>${report ? "Cited taste brief" : "Generate after reactions"}</h2>
+            </div>
+            ${
+              session
+                ? `<button class="pill-btn pill-btn-solid" type="button" id="discovery-report-btn" ${state.discoveryStatus === "reporting" ? "disabled" : ""}>${state.discoveryStatus === "reporting" ? "Generating..." : "Generate report"}</button>`
+                : ""
+            }
+          </header>
+          ${report ? renderDiscoveryReport(report, session) : `<p class="empty-copy">The report will summarize liked patterns, rejected patterns, tensions, open questions, and directions to test on the call.</p>`}
+        </article>
+      </div>
+    </section>
+  `;
+
+  const form = document.getElementById("discovery-form") as HTMLFormElement | null;
+  form?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void handleDiscoveryCreate(form);
+  });
+  container.querySelectorAll<HTMLButtonElement>("[data-discovery-vote]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const vote = button.getAttribute("data-discovery-vote") as DiscoveryReactionVote | null;
+      const itemId = button.getAttribute("data-discovery-item");
+      if (!vote || !itemId) return;
+      const noteInput = document.getElementById("discovery-note") as HTMLTextAreaElement | null;
+      const intensityInput = document.getElementById("discovery-intensity") as HTMLInputElement | null;
+      void handleDiscoveryReaction(itemId, vote, Number(intensityInput?.value ?? 3), noteInput?.value ?? "");
+    });
+  });
+  document.getElementById("discovery-prev")?.addEventListener("click", () => {
+    if (!state.discoverySession) return;
+    state.discoveryActiveIndex = Math.max(0, state.discoveryActiveIndex - 1);
+    renderDiscoveryView();
+  });
+  document.getElementById("discovery-next")?.addEventListener("click", () => {
+    if (!state.discoverySession) return;
+    state.discoveryActiveIndex = Math.min(state.discoverySession.items.length - 1, state.discoveryActiveIndex + 1);
+    renderDiscoveryView();
+  });
+  document.getElementById("discovery-report-btn")?.addEventListener("click", () => {
+    void handleDiscoveryReport();
+  });
+  if (state.view === "discovery") applyReveal(container);
+}
+
+function renderDiscoveryActiveCard(session: DiscoverySessionRecord, item: DiscoverySessionRecord["items"][number]): string {
+  const reaction = session.reactions.find((candidate) => candidate.itemId === item.id) ?? null;
+  return `
+    <div class="discovery-card">
+      <div class="reference-platform">${escapeHtml(item.platform)}</div>
+      <h3>${escapeHtml(item.title)}</h3>
+      ${item.sourceUrl ? `<p class="discovery-url">${escapeHtml(item.sourceUrl)}</p>` : ""}
+      <div class="signal-cloud signal-cloud-tight">
+        ${item.tags.length > 0 ? item.tags.map((tag) => `<span class="signal-chip">${escapeHtml(tag)}</span>`).join("") : `<span class="signal-chip signal-chip-empty">No tags yet</span>`}
+      </div>
+      ${reaction ? `<p class="discovery-current-reaction">Current read: ${escapeHtml(formatDiscoveryVote(reaction.vote))}${reaction.note ? ` · ${escapeHtml(reaction.note)}` : ""}</p>` : ""}
+      <label class="field">
+        <span>Client note</span>
+        <textarea id="discovery-note" rows="3" placeholder="What about this feels right or wrong?">${escapeHtml(reaction?.note ?? "")}</textarea>
+      </label>
+      <label class="field discovery-intensity">
+        <span>Intensity</span>
+        <input id="discovery-intensity" type="range" min="1" max="5" value="${reaction?.intensity ?? 3}" />
+      </label>
+      <div class="discovery-vote-row">
+        ${(["like", "save", "dislike", "not-this"] as DiscoveryReactionVote[])
+          .map((vote) => `<button class="pill-btn ${vote === "like" || vote === "save" ? "pill-btn-solid" : ""}" type="button" data-discovery-vote="${vote}" data-discovery-item="${item.id}">${escapeHtml(formatDiscoveryVote(vote))}</button>`)
+          .join("")}
+      </div>
+      <div class="detail-inline-actions discovery-step-row">
+        <button class="link-btn" type="button" id="discovery-prev">Previous</button>
+        <span>${session.items.indexOf(item) + 1} of ${session.items.length}</span>
+        <button class="link-btn" type="button" id="discovery-next">Next</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderDiscoveryReport(report: DiscoveryReport, session: DiscoverySessionRecord | null): string {
+  const itemById = new Map((session?.items ?? []).map((item) => [item.id, item] as const));
+  return `
+    <div class="discovery-report">
+      <p class="lede">${escapeHtml(report.summary)}</p>
+      ${renderDiscoveryReportSection("What they consistently liked", report.likedPatterns)}
+      ${renderDiscoveryReportSection("What they rejected", report.rejectedPatterns)}
+      ${renderDiscoveryReportSection("Taste tensions", report.tensions)}
+      ${renderDiscoveryReportSection("Questions to resolve on the call", report.openQuestions)}
+      ${renderDiscoveryReportSection("Creative directions worth exploring", report.recommendedDirections)}
+      <div class="detail-block">
+        <span class="detail-label">References to cite during the pitch</span>
+        <div class="citation-row">
+          ${report.citedItemIds.map((id) => `<span class="citation-pill">${escapeHtml(itemById.get(id)?.title ?? id)}</span>`).join("") || "No citations"}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderDiscoveryReportSection(title: string, lines: string[]): string {
+  return `
+    <div class="detail-block">
+      <span class="detail-label">${escapeHtml(title)}</span>
+      ${
+        lines.length > 0
+          ? `<ul class="detail-list compact-list">${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>`
+          : `<p class="empty-copy">No clear pattern yet.</p>`
+      }
+    </div>
+  `;
+}
+
+async function handleDiscoveryCreate(form: HTMLFormElement): Promise<void> {
+  const formData = new FormData(form);
+  state.discoveryForm = {
+    title: String(formData.get("title") ?? ""),
+    clientName: String(formData.get("clientName") ?? ""),
+    campaignGoal: String(formData.get("campaignGoal") ?? ""),
+    prompt: String(formData.get("prompt") ?? ""),
+    durationTargetMinutes: Number(formData.get("durationTargetMinutes") ?? 20),
+    referenceIds: formData.getAll("referenceIds").map((value) => String(value)).filter(Boolean),
+    customUrl: String(formData.get("customUrl") ?? ""),
+    customTitle: String(formData.get("customTitle") ?? ""),
+    customTags: String(formData.get("customTags") ?? ""),
+  };
+  state.discoveryStatus = "creating";
+  state.discoveryError = null;
+  renderDiscoveryView();
+  try {
+    const items = [
+      ...state.discoveryForm.referenceIds.map((referenceId) => ({ referenceId })),
+      ...(state.discoveryForm.customUrl.trim()
+        ? [{
+          sourceUrl: state.discoveryForm.customUrl.trim(),
+          title: state.discoveryForm.customTitle.trim() || state.discoveryForm.customUrl.trim(),
+          tags: state.discoveryForm.customTags.split(",").map((tag) => tag.trim()).filter(Boolean),
+        }]
+        : []),
+    ];
+    const response = await fetchJson<DiscoverySessionResponse>("/api/discovery/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: state.discoveryForm.title,
+        clientName: state.discoveryForm.clientName,
+        campaignGoal: state.discoveryForm.campaignGoal,
+        prompt: state.discoveryForm.prompt,
+        durationTargetMinutes: state.discoveryForm.durationTargetMinutes,
+        items,
+      }),
+    });
+    state.discoverySession = response.session;
+    state.discoveryReport = response.report;
+    state.discoveryActiveIndex = 0;
+  } catch (error) {
+    state.discoveryError = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.discoveryStatus = "idle";
+    renderDiscoveryView();
+  }
+}
+
+async function handleDiscoveryReaction(itemId: string, vote: DiscoveryReactionVote, intensity: number, note: string): Promise<void> {
+  if (!state.discoverySession) return;
+  state.discoveryStatus = "reacting";
+  renderDiscoveryView();
+  try {
+    const response = await fetchJson<DiscoverySessionResponse>(`/api/discovery/sessions/${encodeURIComponent(state.discoverySession.id)}/reactions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ itemId, vote, intensity, note }),
+    });
+    state.discoverySession = response.session;
+    state.discoveryReport = response.report;
+    state.discoveryActiveIndex = Math.min(state.discoveryActiveIndex + 1, Math.max(0, response.session.items.length - 1));
+  } finally {
+    state.discoveryStatus = "idle";
+    renderDiscoveryView();
+  }
+}
+
+async function handleDiscoveryReport(): Promise<void> {
+  if (!state.discoverySession) return;
+  state.discoveryStatus = "reporting";
+  renderDiscoveryView();
+  try {
+    const response = await fetchJson<DiscoverySessionResponse>(`/api/discovery/sessions/${encodeURIComponent(state.discoverySession.id)}/report`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    state.discoverySession = response.session;
+    state.discoveryReport = response.report;
+  } finally {
+    state.discoveryStatus = "idle";
+    renderDiscoveryView();
+  }
+}
+
+function getDiscoveryReferenceOptions(): ReferenceSummary[] {
+  const selectedIds = new Set(state.discoveryForm.referenceIds);
+  const selected = state.catalog.references.filter((reference) => selectedIds.has(reference.id));
+  const recent = state.catalog.references.filter((reference) => !selectedIds.has(reference.id)).slice(0, 12);
+  return [...selected, ...recent].slice(0, 16);
+}
+
+function formatDiscoveryVote(vote: DiscoveryReactionVote): string {
+  if (vote === "not-this") return "Not this";
+  return vote[0]!.toUpperCase() + vote.slice(1);
 }
 
 async function rerunAnalysis(referenceId: string): Promise<void> {
@@ -1462,11 +1930,11 @@ function renderIdeasView(): void {
     button.addEventListener("click", () => {
       const id = button.getAttribute("data-open-reference");
       if (!id) return;
-      state.selectedReferenceId = id;
-      renderReferencesView();
+      inspectReference(id);
       void navigateWithSearchTransition("references");
     });
   });
+  if (state.view === "ideas") applyReveal(container);
 }
 
 async function handleIdeaSubmit(form: HTMLFormElement): Promise<void> {
@@ -1572,14 +2040,20 @@ function updateViewVisibility(): void {
   document.querySelectorAll<HTMLElement>("[data-view-panel]").forEach((panel) => {
     const view = panel.getAttribute("data-view-panel");
     const isActive = view === state.view;
-    if (isActive && panel.classList.contains("hidden")) {
+    if (isActive) {
+      const shouldReveal = panel.classList.contains("hidden") || panel.dataset.revealedView !== state.view;
       panel.classList.remove("hidden");
-      panel.classList.remove("is-entering");
-      void panel.offsetWidth; // force reflow so animation restarts
-      panel.classList.add("is-entering");
+      if (shouldReveal) {
+        panel.classList.remove("is-entering");
+        void panel.offsetWidth; // force reflow so animation restarts
+        panel.classList.add("is-entering");
+        panel.dataset.revealedView = state.view;
+        applyReveal(panel, { baseDelay: 30 });
+      }
     } else if (!isActive) {
       panel.classList.add("hidden");
       panel.classList.remove("is-entering");
+      delete panel.dataset.revealedView;
     }
   });
   const workspaceShell = document.getElementById("workspace-shell");
@@ -1621,21 +2095,113 @@ function renderReferenceStripCard(reference: ReferenceSummary): string {
   `;
 }
 
-function renderCaptureHistory(capture: CaptureRecord): string {
+function renderReferenceRelationshipPanel(
+  reference: ReferenceSummary | null,
+  relationContext: RelatedReferencesResponse | null,
+): string {
+  if (!reference) {
+    return `
+      <article class="surface-card reference-relationship-card">
+        <span class="eyebrow">Connections</span>
+        <h2>Pick a reference</h2>
+        <p class="empty-copy">Select a card to see what it belongs to, why nearby pages are linked, and where it opens into the wider archive.</p>
+      </article>
+    `;
+  }
+  const relationItems = relationContext?.relationDetails ?? [];
   return `
-    <article class="history-card">
+    <article class="surface-card reference-relationship-card">
+      <div class="surface-head surface-head-compact">
+        <div>
+          <span class="eyebrow">Related Because</span>
+          <h2>${escapeHtml(reference.title)}</h2>
+        </div>
+        <button class="pill-btn" type="button" data-relationship-open-page="${escapeAttribute(reference.pagePath)}">Open wiki page</button>
+      </div>
+      <p class="reference-relationship-summary">${escapeHtml(reference.summary)}</p>
+      <div class="reference-relationship-chip-row">
+        ${renderRelationMetaChip("Platform", reference.platform)}
+        ${renderRelationMetaChip("Saved", formatDate(reference.createdAt))}
+        ${renderRelationMetaChip("Thread", reference.collection ?? reference.sourceKind)}
+      </div>
+      <div class="detail-block">
+        <span class="detail-label">What role this page is playing</span>
+        <div class="signal-cloud signal-cloud-tight">
+          ${renderSignalChips([...reference.themes.slice(0, 2), ...reference.motifs.slice(0, 1), ...reference.formatSignals.slice(0, 1)])}
+        </div>
+      </div>
+      <div class="detail-block">
+        <span class="detail-label">Connection map</span>
+        ${
+          state.relatedReferenceStatus === "loading"
+            ? `<p class="empty-copy">Tracing nearby pages…</p>`
+            : relationItems.length > 0
+              ? `<div class="reference-relationship-list">${relationItems.map((item) => renderRelationCard(item)).join("")}</div>`
+              : `<p class="empty-copy">No strong typed relations have stabilized for this page yet.</p>`
+        }
+      </div>
+      <div class="detail-block">
+        <span class="detail-label">Catalysts in the same zone</span>
+        ${
+          (relationContext?.catalysts.length ?? 0) > 0
+            ? `<div class="signal-cloud signal-cloud-tight">${relationContext!.catalysts.slice(0, 5).map((catalyst) => `<span class="signal-chip">${escapeHtml(catalyst.label)}</span>`).join("")}</div>`
+            : `<p class="empty-copy">No shared catalysts surfaced yet.</p>`
+        }
+      </div>
+    </article>
+  `;
+}
+
+function renderRelationCard(item: NonNullable<RelatedReferencesResponse["relationDetails"]>[number]): string {
+  return `
+    <button class="reference-relation-card" type="button" data-related-reference-id="${escapeAttribute(item.reference.id)}">
+      <div class="reference-relation-head">
+        <div>
+          <span class="reference-platform">${escapeHtml(item.reference.platform)}</span>
+          <strong>${escapeHtml(item.reference.title)}</strong>
+        </div>
+        <span class="reference-relation-open">Inspect</span>
+      </div>
+      <p>${escapeHtml(item.reason)}</p>
+      <div class="reference-relationship-chip-row">
+        ${item.relationKinds.slice(0, 3).map((kind) => `<span class="reference-relation-pill">${escapeHtml(formatRelationKind(kind))}</span>`).join("")}
+      </div>
+    </button>
+  `;
+}
+
+function renderRelationMetaChip(label: string, value: string): string {
+  return `<span class="reference-relation-pill"><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</span>`;
+}
+
+function formatRelationKind(value: string): string {
+  return value.replace(/-/g, " ");
+}
+
+function renderCaptureHistory(capture: CaptureRecord, options?: { isLatest?: boolean }): string {
+  const reference = state.catalog.references.find((item) => item.id === capture.id) ?? null;
+  const title = getCaptureDisplayTitle(capture, reference?.title ?? null);
+  const meta = [capture.platform, formatDate(capture.createdAt), capture.collection].filter(Boolean).join(" · ");
+  const pagePath = getCaptureHistoryPagePath(capture, reference);
+  const cardAttrs = pagePath
+    ? ` data-history-open-page="${escapeAttribute(pagePath)}" tabindex="0" role="link" aria-label="${escapeAttribute(`Open wiki page for ${title}`)}"`
+    : "";
+  return `
+    <article class="history-card ${pagePath ? "history-card-link " : ""}${options?.isLatest ? "history-card-current" : ""}"${cardAttrs}>
       <div>
-        <strong>${escapeHtml(capture.metadata.title ?? capture.sourceUrl)}</strong>
-        <p>${escapeHtml(capture.platform)} · ${formatDate(capture.createdAt)} · ${capture.status}</p>
-        <p>${escapeHtml(capture.sourceKind)}${capture.collection ? ` · ${escapeHtml(capture.collection)}` : ""}</p>
+        <strong>${escapeHtml(title)}</strong>
+        <p>${escapeHtml(meta)}</p>
       </div>
       <div class="history-card-actions">
-        <span class="history-mode">${escapeHtml(capture.acquisitionCoverage ?? "url-only")}</span>
-        <span class="history-mode">${escapeHtml(capture.ingestionMode)}</span>
+        <span class="history-mode">${escapeHtml(options?.isLatest ? "Just saved" : capture.sourceKind.replace(/-/g, " "))}</span>
         <button class="history-delete-btn" type="button" data-capture-id="${escapeHtml(capture.id)}" title="Delete capture">×</button>
       </div>
     </article>
   `;
+}
+
+function getCaptureHistoryPagePath(capture: CaptureRecord, reference: ReferenceSummary | null): string | null {
+  return reference?.pagePath ?? capture.rawPaths.referencePage ?? null;
 }
 
 function getIdeaReferenceOptions(): ReferenceSummary[] {
@@ -2138,13 +2704,47 @@ function truncateText(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
+function getCaptureDisplayTitle(capture: CaptureRecord, preferredTitle: string | null): string {
+  const rawTitle = preferredTitle ?? capture.metadata.title ?? capture.note ?? capture.sourceUrl;
+  const decoded = decodeHtmlEntities(rawTitle).replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+  if (!decoded) return capture.platform ? `${capture.platform} reference` : "Captured reference";
+  if (capture.platform.toLowerCase() === "instagram") {
+    const withoutPrefix = decoded.replace(/^[^:]{1,120}\s+on Instagram:\s*/i, "").trim();
+    const conciseInstagramTitle = buildConciseCaptureTitle(withoutPrefix, 84);
+    if (conciseInstagramTitle) return conciseInstagramTitle;
+  }
+  return buildConciseCaptureTitle(decoded, 96) || decoded;
+}
+
+function buildConciseCaptureTitle(value: string, max: number): string {
+  const cleaned = value.replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, "").trim();
+  if (!cleaned) return "";
+  const sentence = cleaned
+    .split(/(?<=[.!?])\s+/)
+    .map((segment) => segment.trim())
+    .find((segment) => segment.split(/\s+/).length >= 3)
+    ?? cleaned;
+  const clause = sentence
+    .split(/\s+[—–-]\s+|:\s+|;\s+/)
+    .map((segment) => segment.trim())
+    .find((segment) => segment.split(/\s+/).length >= 3)
+    ?? sentence;
+  return truncateText(clause.replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, "").trim(), max);
+}
+
+function decodeHtmlEntities(value: string): string {
+  const textarea = document.createElement("textarea");
+  textarea.innerHTML = value;
+  return textarea.value;
+}
+
 function describeTranscriptSource(source: string | null | undefined): string {
   switch (source) {
     case "web-article": return "article body extracted";
     case "youtube": return "YouTube transcript";
     case "podcast-page": return "podcast page transcript";
     case "podcast-rss": return "podcast RSS transcript";
-    case "audio-upload": return "audio transcribed";
+    case "audio-upload": return "local media transcribed";
     case "manual": return "manual transcript";
     default: return "metadata only (no body text)";
   }

@@ -134,6 +134,16 @@ interface QueryRerankRequest {
   candidates: QueryIndexEntry[];
 }
 
+export interface DiscoveryReportDraft {
+  summary: string;
+  likedPatterns: string[];
+  rejectedPatterns: string[];
+  tensions: string[];
+  openQuestions: string[];
+  recommendedDirections: string[];
+  citedItemIds: string[];
+}
+
 const PLANNING_GUARDRAILS = [
   "Voice-first. Reuse the creator's actual language when it is usable.",
   "Never write the creator's personal lines. Use [YOUR LINE: ...] or [YOUR MOMENT: ...] placeholders instead.",
@@ -189,6 +199,36 @@ export async function generateIdeaPlan(context: IdeaGenerationContext): Promise<
     if (!content) return null;
 
     return validateIdeaPlan(parseJsonObject(content), context.outputType);
+  } catch {
+    return null;
+  }
+}
+
+export async function generateDiscoveryReportDraft(context: Record<string, unknown>): Promise<DiscoveryReportDraft | null> {
+  const provider = readOpenAIProviderConfig();
+  if (!provider) return null;
+
+  try {
+    const content = await requestOpenAICompletion(provider, [
+      {
+        role: "system",
+        content: [
+          "You are Aftertaste's client discovery analyst.",
+          "Return JSON only.",
+          "Treat reactions as alignment evidence, not as a finished creative decision.",
+          "Use exploratory language only: this could point toward, one possibility, this may suggest.",
+          "Cite only discovery item ids from the provided context.",
+          "Do not mention scraping, platform login, FYP import, or unauthorized platform collection.",
+          "Keep recommendedDirections to at most 3 options.",
+        ].join("\n"),
+      },
+      {
+        role: "user",
+        content: buildDiscoveryReportPrompt(context),
+      },
+    ]);
+    if (!content) return null;
+    return validateDiscoveryReportDraft(parseJsonObject(content), getDiscoveryItemIds(context));
   } catch {
     return null;
   }
@@ -259,7 +299,9 @@ export async function analyzeCaptureSignals(
           "If a category is unsupported, return an empty array for that category.",
           "For text-only captures with no media assets, do not infer b-roll, pacing, audio design, or visual style unless the text explicitly describes them.",
           "Never invent creatorly or cinematic tags from vibe alone.",
-          "Write a grounded summary in 1-2 sentences about what this capture is actually doing. Do not mention camera language unless it is explicit in the text.",
+          "Write a grounded summary in 1-2 sentences about why this likely entered the creator's archive and what role it seems to play there, not just what the source says.",
+          "If the note or saved reason reveals personal significance, reflect that directly.",
+          "Do not mention camera language unless it is explicit in the text.",
           "Open questions should only point to real ambiguity still visible in the source.",
           "Use at most 3 tags per category.",
         ].join("\n"),
@@ -430,6 +472,35 @@ export function buildIdeaPlannerPrompt(context: IdeaGenerationContext): string {
   ].join("\n");
 }
 
+function buildDiscoveryReportPrompt(context: Record<string, unknown>): string {
+  return [
+    "Create a DiscoveryReport JSON object with this exact shape:",
+    JSON.stringify(
+      {
+        summary: "2-4 sentence taste read for the agency or freelancer",
+        likedPatterns: ["pattern the client consistently liked"],
+        rejectedPatterns: ["pattern the client pushed away from"],
+        tensions: ["productive tension to clarify on the call"],
+        openQuestions: ["question to resolve in the discovery call"],
+        recommendedDirections: ["exploratory creative direction"],
+        citedItemIds: ["item-id"],
+      },
+      null,
+      2,
+    ),
+    "",
+    "Rules:",
+    "- Use exploratory language only.",
+    "- Keep recommendedDirections to at most 3 options.",
+    "- Ground every pattern in reactions or reference evidence.",
+    "- Do not claim the client definitively wants something; say what the session could point toward.",
+    "- Cite discovery item ids only.",
+    "",
+    "Context:",
+    JSON.stringify(context, null, 2).slice(0, 16000),
+  ].join("\n");
+}
+
 function buildCaptureSignalAnalysisPrompt(input: CaptureSignalAnalysisRequest): string {
   return [
     "Classify this capture using the exact allowed slugs.",
@@ -445,7 +516,7 @@ function buildCaptureSignalAnalysisPrompt(input: CaptureSignalAnalysisRequest): 
         audioSignals: [{ slug: "slug-name", score: 0.0, evidence: ["exact quote"] }],
         pacingSignals: [{ slug: "slug-name", score: 0.0, evidence: ["exact quote"] }],
         storySignals: [{ slug: "slug-name", score: 0.0, evidence: ["exact quote"] }],
-        summary: "1-2 sentence grounded summary",
+        summary: "1-2 sentence grounded archive summary",
         openQuestions: ["question that stays close to the source"],
       },
       null,
@@ -616,6 +687,44 @@ function validateSnapshotIntelligence(
     tensions,
     openQuestions,
   };
+}
+
+function validateDiscoveryReportDraft(value: unknown, allowedItemIds: Set<string>): DiscoveryReportDraft | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const summary = typeof record.summary === "string" ? record.summary.trim() : "";
+  if (!summary) return null;
+  return {
+    summary,
+    likedPatterns: validateStringList(record.likedPatterns, 6),
+    rejectedPatterns: validateStringList(record.rejectedPatterns, 6),
+    tensions: validateStringList(record.tensions, 4),
+    openQuestions: validateStringList(record.openQuestions, 6),
+    recommendedDirections: validateStringList(record.recommendedDirections, 3),
+    citedItemIds: validateStringList(record.citedItemIds, 10).filter((id) => allowedItemIds.has(id)),
+  };
+}
+
+function validateStringList(value: unknown, max: number): string[] {
+  return Array.isArray(value)
+    ? value
+        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        .map((item) => item.trim())
+        .slice(0, max)
+    : [];
+}
+
+function getDiscoveryItemIds(context: Record<string, unknown>): Set<string> {
+  const items = Array.isArray(context.items) ? context.items : [];
+  return new Set(
+    items
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const id = (item as Record<string, unknown>).id;
+        return typeof id === "string" ? id : null;
+      })
+      .filter((id): id is string => id !== null),
+  );
 }
 
 function validateCreatorPatterns(

@@ -16,8 +16,11 @@ export interface SearchReferenceCardItem {
   colSpan?: number;
   rowSpan?: number;
   hasPersistentHover?: boolean;
+  cta?: string;
+  actionLabel?: string;
   onOpen: () => void;
   onAction: () => void;
+  onDelete?: () => void;
 }
 
 interface ReferenceSearchResultsProps {
@@ -58,10 +61,11 @@ export function ReferenceSearchResults({ items }: ReferenceSearchResultsProps) {
     colSpan: item.colSpan,
     rowSpan: item.rowSpan,
     hasPersistentHover: item.hasPersistentHover,
-    cta: "Open in studio",
-    actionLabel: "Use in ideas",
+    cta: item.cta || "Open",
+    actionLabel: item.actionLabel || "Use in ideas",
     onOpen: item.onOpen,
     onAction: item.onAction,
+    onDelete: item.onDelete,
   }));
 
   return (

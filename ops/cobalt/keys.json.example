@@ -1,0 +1,7 @@
+{
+  "replace-with-your-own-uuid-v4": {
+    "name": "aftertaste-server",
+    "limit": "unlimited",
+    "allowedServices": "all"
+  }
+}

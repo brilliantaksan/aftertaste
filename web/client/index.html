@@ -29,6 +29,7 @@
         <nav class="site-nav">
           <button class="nav-pill is-active" type="button" data-nav-view="home">Home</button>
           <button class="nav-pill" type="button" data-nav-view="capture">Capture</button>
+          <button class="nav-pill" type="button" data-nav-view="discovery">Discovery</button>
           <div id="header-search-dock-root" class="site-search-dock-slot"></div>
           <button class="nav-pill" type="button" data-nav-view="ideas">Create Ideas</button>
           <button class="nav-pill" type="button" data-nav-view="studio">Wiki Explorer</button>
@@ -69,6 +70,7 @@
         <div class="view-stack">
           <section id="view-home" class="view-panel" data-view-panel="home"></section>
           <section id="view-capture" class="view-panel hidden" data-view-panel="capture"></section>
+          <section id="view-discovery" class="view-panel hidden" data-view-panel="discovery"></section>
           <section id="view-references" class="view-panel hidden" data-view-panel="references"></section>
           <section id="view-ideas" class="view-panel hidden" data-view-panel="ideas"></section>
 
@@ -95,37 +97,30 @@
                     </div>
                   </div>
                   <article id="page-content"><p class="loading">Loading page</p></article>
-                </section>
-
-                <aside id="sidebar-right" class="studio-column studio-context-rail wiki-window-shell">
-                  <header class="studio-rail-head studio-window-toolbar">
-                    <div class="studio-toolbar-meta">
-                      <div>
+                  <footer class="wiki-article-footer">
+                    <section class="wiki-footer-section">
+                      <div class="wiki-footer-head">
                         <span class="eyebrow">Encyclopedia</span>
-                        <h2>Context rail</h2>
+                        <h2>Page context</h2>
                       </div>
-                    </div>
-                  </header>
-                  <div id="article-context"><p class="loading">Loading article context</p></div>
-                  <div class="studio-side-section">
-                    <div class="surface-head surface-head-compact">
-                      <div>
+                      <div id="article-context"><p class="loading">Loading article context</p></div>
+                    </section>
+                    <section class="wiki-footer-section">
+                      <div class="wiki-footer-head">
                         <span class="eyebrow">Lint</span>
                         <h3>Page health</h3>
                       </div>
-                    </div>
-                    <div id="lint-list"><p class="loading">Loading lint</p></div>
-                  </div>
-                  <div class="studio-side-section">
-                    <div class="surface-head surface-head-compact">
-                      <div>
+                      <div id="lint-list"><p class="loading">Loading lint</p></div>
+                    </section>
+                    <section class="wiki-footer-section">
+                      <div class="wiki-footer-head">
                         <span class="eyebrow">Audit</span>
                         <h3>Open feedback</h3>
                       </div>
-                    </div>
-                    <div id="audit-list"><p class="loading">Loading audits</p></div>
-                  </div>
-                </aside>
+                      <div id="audit-list"><p class="loading">Loading audits</p></div>
+                    </section>
+                  </footer>
+                </section>
               </div>
             </div>
           </section>

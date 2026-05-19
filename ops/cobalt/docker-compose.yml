@@ -1,0 +1,22 @@
+services:
+  cobalt-api:
+    image: ghcr.io/imputnet/cobalt:11
+    container_name: aftertaste-cobalt
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:9000:9000"
+    environment:
+      API_URL: "https://cobalt.brilliantaksan.com/"
+      API_AUTH_REQUIRED: "1"
+      API_KEY_URL: "file:///keys.json"
+      # Uncomment if some providers need authenticated public fetches.
+      # COOKIE_PATH: "/cookies.json"
+      #
+      # Optional Bearer-token path for browser-facing clients:
+      # TURNSTILE_SITEKEY: "your-turnstile-sitekey"
+      # TURNSTILE_SECRET: "your-turnstile-secret"
+      # JWT_SECRET: "generate-a-long-random-secret"
+    volumes:
+      - ./keys.json:/keys.json:ro
+      # - ./cookies.json:/cookies.json:ro

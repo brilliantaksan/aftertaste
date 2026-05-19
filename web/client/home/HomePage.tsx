@@ -91,6 +91,35 @@ function buildFocusedSubgraph(graph: TasteGraph, focusedNodeId: string): TasteGr
   };
 }
 
+function formatRelationLabel(value: string): string {
+  return value.replace(/[_-]/g, " ");
+}
+
+function buildFocusedEdgeSummaries(graph: TasteGraph, focusedNodeId: string): Array<{
+  id: string;
+  title: string;
+  explanation: string;
+  relationKinds: string[];
+}> {
+  const nodeById = new Map(graph.nodes.map((node) => [node.id, node] as const));
+  return graph.edges
+    .filter((edge) => edge.sourceId === focusedNodeId || edge.targetId === focusedNodeId)
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, 3)
+    .map((edge) => {
+      const otherId = edge.sourceId === focusedNodeId ? edge.targetId : edge.sourceId;
+      const other = nodeById.get(otherId);
+      return {
+        id: edge.id,
+        title: other?.title || other?.label || otherId,
+        explanation: edge.evidence.explanation || "Connected inside the archive graph.",
+        relationKinds: edge.evidence.relationKinds?.length
+          ? edge.evidence.relationKinds
+          : [edge.kind],
+      };
+    });
+}
+
 function InlineTasteGraphPreview({ graph }: InlineTasteGraphPreviewProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
 
@@ -199,6 +228,10 @@ export default function HomePage({ onNavigate }: HomePageProps) {
   const focusedPreviewGraph = useMemo(() => {
     if (!data.graph || !focusedNode) return null;
     return buildFocusedSubgraph(data.graph, focusedNode.id);
+  }, [data.graph, focusedNode]);
+  const focusedEdgeSummaries = useMemo(() => {
+    if (!data.graph || !focusedNode) return [];
+    return buildFocusedEdgeSummaries(data.graph, focusedNode.id);
   }, [data.graph, focusedNode]);
   const showGraphPreview = Boolean(hoveredWord && data.graph && focusedNode);
 
@@ -328,6 +361,22 @@ export default function HomePage({ onNavigate }: HomePageProps) {
               <div className="hero-graph-preview">
                 <InlineTasteGraphPreview graph={focusedPreviewGraph} />
               </div>
+
+              {focusedEdgeSummaries.length > 0 ? (
+                <div className="hero-graph-relations">
+                  {focusedEdgeSummaries.map((edge) => (
+                    <article key={edge.id} className="hero-graph-relation-card">
+                      <strong>{edge.title}</strong>
+                      <p>{edge.explanation}</p>
+                      <div className="hero-graph-relation-pills">
+                        {edge.relationKinds.slice(0, 3).map((kind) => (
+                          <span key={kind} className="hero-graph-relation-pill">{formatRelationLabel(kind)}</span>
+                        ))}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : null}
 
               <p className="hero-graph-caption">
                 The graph preview follows the highlighted word and returns to Archive pulse when the hover ends.

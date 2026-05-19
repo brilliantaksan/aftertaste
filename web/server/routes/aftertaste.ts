@@ -3,13 +3,16 @@ import type { ServerConfig } from "../config.js";
 import {
   applyWikiCleanup,
   compileAftertaste,
+  createDiscoverySession,
   createProjectBrief,
   createCapture,
   deleteCapture,
+  generateDiscoveryReport,
   generateIdeas,
   getCaptureDetail,
   getCurrentSnapshot,
   getCurrentSnapshotSmart,
+  getDiscoverySession,
   getProjectBrief,
   getRelatedReferences,
   getWikiArticleDetail,
@@ -18,6 +21,7 @@ import {
   listProjectBriefs,
   listReferencesSmart,
   planWikiCleanup,
+  recordDiscoveryReaction,
   runAnalysis,
   searchQueryIndex,
   searchQueryIndexSmart,
@@ -27,6 +31,8 @@ import type {
   BriefCreateRequest,
   CaptureAssetInput,
   CaptureCreateRequest,
+  DiscoveryReactionRequest,
+  DiscoverySessionCreateRequest,
   IdeaRequest,
   ProjectBrief,
   QueryIndexEntry,
@@ -367,6 +373,96 @@ export function handleIdeas(cfg: ServerConfig) {
   };
 }
 
+export function handleDiscoverySessionCreate(cfg: ServerConfig) {
+  return (req: Request, res: Response) => {
+    try {
+      const body = req.body as Partial<DiscoverySessionCreateRequest>;
+      if (typeof body.title !== "string" || !body.title.trim()) {
+        res.status(400).json({ error: "title is required" });
+        return;
+      }
+      if (typeof body.campaignGoal !== "string" || !body.campaignGoal.trim()) {
+        res.status(400).json({ error: "campaignGoal is required" });
+        return;
+      }
+      const session = createDiscoverySession(cfg.wikiRoot, {
+        title: body.title,
+        clientName: typeof body.clientName === "string" ? body.clientName : "",
+        campaignGoal: body.campaignGoal,
+        prompt: typeof body.prompt === "string" ? body.prompt : "",
+        durationTargetMinutes: typeof body.durationTargetMinutes === "number" ? body.durationTargetMinutes : undefined,
+        items: Array.isArray(body.items) ? body.items : [],
+      });
+      res.status(201).json({ session, report: null });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+}
+
+export function handleDiscoverySessionDetail(cfg: ServerConfig) {
+  return (req: Request, res: Response) => {
+    try {
+      const id = req.params.id;
+      if (!id) {
+        res.status(400).json({ error: "discovery session id is required" });
+        return;
+      }
+      res.json(getDiscoverySession(cfg.wikiRoot, id));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(message.includes("not found") ? 404 : 500).json({ error: message });
+    }
+  };
+}
+
+export function handleDiscoveryReactionCreate(cfg: ServerConfig) {
+  return (req: Request, res: Response) => {
+    try {
+      const id = req.params.id;
+      if (!id) {
+        res.status(400).json({ error: "discovery session id is required" });
+        return;
+      }
+      const body = req.body as Partial<DiscoveryReactionRequest>;
+      if (typeof body.itemId !== "string" || !body.itemId.trim()) {
+        res.status(400).json({ error: "itemId is required" });
+        return;
+      }
+      if (!isDiscoveryVote(body.vote)) {
+        res.status(400).json({ error: "vote must be like, dislike, save, or not-this" });
+        return;
+      }
+      const session = recordDiscoveryReaction(cfg.wikiRoot, id, {
+        itemId: body.itemId,
+        vote: body.vote,
+        intensity: typeof body.intensity === "number" ? body.intensity : undefined,
+        note: typeof body.note === "string" ? body.note : "",
+      });
+      res.json({ session, report: null });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(message.includes("not found") ? 404 : 400).json({ error: message });
+    }
+  };
+}
+
+export function handleDiscoveryReportCreate(cfg: ServerConfig) {
+  return async (req: Request, res: Response) => {
+    try {
+      const id = req.params.id;
+      if (!id) {
+        res.status(400).json({ error: "discovery session id is required" });
+        return;
+      }
+      res.json(await generateDiscoveryReport(cfg.wikiRoot, id));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(message.includes("not found") ? 404 : 500).json({ error: message });
+    }
+  };
+}
+
 function normalizeQuery(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -404,6 +500,10 @@ function isDeliverableType(value: unknown): value is ProjectBrief["deliverableTy
 
 function isSourceKind(value: unknown): value is SourceKind {
   return value === "reference" || value === "journal" || value === "brief" || value === "voice-note" || value === "moodboard";
+}
+
+function isDiscoveryVote(value: unknown): value is DiscoveryReactionRequest["vote"] {
+  return value === "like" || value === "dislike" || value === "save" || value === "not-this";
 }
 
 function isQueryKind(value: unknown): value is QueryIndexEntry["kind"] {

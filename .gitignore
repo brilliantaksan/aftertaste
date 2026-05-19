@@ -21,3 +21,6 @@ web/dist/
 obsidian-releases/
 local-vault/
 .gstack/
+ops/cobalt/keys.json
+ops/cobalt/cookies.json
+ops/cobalt/.env

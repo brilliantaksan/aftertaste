@@ -7,6 +7,7 @@ import {
   Globe,
   Plus,
   Star,
+  Trash2,
   TrendingUp,
   Video,
   ArrowUpRight,
@@ -32,6 +33,7 @@ export interface BentoItem {
   actionLabel?: string;
   onOpen?: () => void;
   onAction?: () => void;
+  onDelete?: () => void;
 }
 
 interface BentoGridProps {
@@ -235,6 +237,21 @@ function BentoGrid({ items = itemsSample }: BentoGridProps) {
                   >
                     <Plus className="h-3.5 w-3.5" />
                     {item.actionLabel || "Use in ideas"}
+                  </button>
+                ) : null}
+
+                {item.onDelete ? (
+                  <button
+                    type="button"
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[rgba(153,61,42,0.16)] bg-white/72 text-[var(--ink-faint)] transition-colors duration-200 hover:border-[rgba(153,61,42,0.28)] hover:text-[#993d2a]"
+                    aria-label={`Delete ${item.title}`}
+                    title="Delete reference"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      item.onDelete?.();
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
                   </button>
                 ) : null}
 

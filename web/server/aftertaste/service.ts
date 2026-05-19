@@ -21,6 +21,14 @@ import type {
   CaptureMomentRecord,
   CaptureMomentsArtifact,
   CaptureRecord,
+  DiscoveryItem,
+  DiscoveryItemInput,
+  DiscoveryReaction,
+  DiscoveryReactionRequest,
+  DiscoveryReport,
+  DiscoverySessionCreateRequest,
+  DiscoverySessionRecord,
+  DiscoverySessionResponse,
   CreativeSessionRecord,
   IdeaDraft,
   IdeaGenerationContext,
@@ -60,10 +68,12 @@ import {
   generateConceptArticle,
   generateIdeaPlan,
   getConfiguredTranscriptionProviderReceipt,
+  generateDiscoveryReportDraft,
   rerankQueryEntries,
   synthesizeSnapshotIntelligence,
   transcribeAudioFile,
 } from "./llm.js";
+import { acquireSourceMediaViaCobalt } from "./cobalt.js";
 import { resolveMediaAnalysisArtifact as resolveMediaAnalysisWithAdapter } from "./media-analysis.js";
 
 interface SignalRule {
@@ -96,6 +106,7 @@ interface AftertastePaths {
   outputsCatalystsDir: string;
   outputsBriefsDir: string;
   outputsIdeasDir: string;
+  outputsDiscoveryDir: string;
   snapshotJson: string;
   referencesJson: string;
   queryIndexJson: string;
@@ -280,6 +291,7 @@ export function getAftertastePaths(root: string): AftertastePaths {
     outputsCatalystsDir: path.join(root, "outputs", "catalysts"),
     outputsBriefsDir: path.join(root, "outputs", "briefs"),
     outputsIdeasDir: path.join(root, "outputs", "ideas"),
+    outputsDiscoveryDir: path.join(root, "outputs", "discovery"),
     snapshotJson: path.join(root, "outputs", "app", "snapshot-current.json"),
     referencesJson: path.join(root, "outputs", "app", "references.json"),
     queryIndexJson: path.join(root, "outputs", "app", "query-index.json"),
@@ -310,6 +322,7 @@ export function ensureAftertasteWorkspace(root: string): void {
     paths.outputsCatalystsDir,
     paths.outputsBriefsDir,
     paths.outputsIdeasDir,
+    paths.outputsDiscoveryDir,
   ];
   for (const dir of dirs) {
     fs.mkdirSync(dir, { recursive: true });
@@ -340,12 +353,26 @@ export async function createCapture(
   const metadata = await fetchUrlMetadata(sourceUrl);
   const platform = detectPlatform(sourceUrl);
   const assetDir = path.join(getAftertastePaths(root).rawMediaDir, id);
-  const assets = writeAssets(assetDir, input.assets ?? []).map((asset) => ({
+  const uploadedAssets = writeAssets(assetDir, input.assets ?? []);
+  const cobaltAcquisition = uploadedAssets.length === 0
+    ? await acquireSourceMediaViaCobalt({
+        assetDir,
+        sourceUrl,
+        acquiredAt: createdAt,
+      })
+    : null;
+  const assets = [...uploadedAssets, ...(cobaltAcquisition?.assets ?? [])].map((asset) => ({
     ...asset,
     path: toRel(root, asset.path),
   }));
-  const ingestionMode = deriveIngestionMode(note, assets.length);
-  const acquisitionState = deriveInitialCaptureAcquisitionState(sourceUrl, assets, createdAt, metadata.status);
+  const ingestionMode = deriveIngestionMode(note, uploadedAssets.length);
+  const acquisitionState = deriveInitialCaptureAcquisitionState(
+    sourceUrl,
+    assets,
+    createdAt,
+    metadata.status,
+    cobaltAcquisition ? [cobaltAcquisition.attempt] : [],
+  );
 
   const record: CaptureRecord = {
     id,
@@ -431,6 +458,7 @@ export async function runAnalysis(root: string, captureId: string): Promise<Anal
   const paths = getAftertastePaths(root);
   let capture = readCapture(root, captureId);
   capture = await maybeRefreshCaptureMetadataForAnalysis(root, capture);
+  capture = await maybeAcquireCaptureMediaForAnalysis(root, capture);
   const transcriptArtifact = await ensureTranscriptArtifact(root, capture);
   const mediaAnalysisArtifact = await ensureMediaAnalysisArtifact(root, capture, transcriptArtifact);
   const combinedText = collectCaptureText(capture, transcriptArtifact.text);
@@ -813,6 +841,11 @@ export function getRelatedReferences(root: string, referenceId: string): Related
   return {
     referenceId,
     related,
+    relationDetails: related.map((relatedReference) => ({
+      reference: relatedReference,
+      reason: buildReferenceConnectionReason(reference, relatedReference),
+      relationKinds: deriveReferenceRelationshipFacets(reference, relatedReference).map((facet) => facet.key),
+    })),
     catalysts,
   };
 }
@@ -870,6 +903,104 @@ export function getProjectBrief(root: string, briefId: string): ProjectBrief {
   return withProjectBriefDefaults(readJson<ProjectBrief>(filePath));
 }
 
+export function createDiscoverySession(root: string, input: DiscoverySessionCreateRequest): DiscoverySessionRecord {
+  ensureAftertasteWorkspace(root);
+  const title = (input.title ?? "").trim();
+  const campaignGoal = (input.campaignGoal ?? "").trim();
+  if (!title) throw new Error("title is required");
+  if (!campaignGoal) throw new Error("campaignGoal is required");
+
+  const createdAt = new Date().toISOString();
+  const sessionId = `discovery-${createdAt.replace(/[-:.TZ]/g, "").slice(0, 14)}-${crypto.randomBytes(2).toString("hex")}`;
+  const items = buildDiscoveryItems(root, sessionId, input.items ?? []);
+  const session: DiscoverySessionRecord = {
+    id: sessionId,
+    title,
+    clientName: (input.clientName ?? "").trim(),
+    campaignGoal,
+    prompt: (input.prompt ?? "React to each reference based on whether it feels right for this campaign.").trim(),
+    durationTargetMinutes: normalizeDiscoveryDuration(input.durationTargetMinutes),
+    status: "active",
+    items,
+    reactions: [],
+    reportId: null,
+    createdAt,
+    updatedAt: createdAt,
+  };
+
+  writeDiscoverySession(root, session);
+  appendLog(root, `## [${timeStamp()}] discovery | ${session.id} — ${session.title}`);
+  return session;
+}
+
+export function getDiscoverySession(root: string, sessionId: string): DiscoverySessionResponse {
+  ensureAftertasteWorkspace(root);
+  const session = readDiscoverySession(root, sessionId);
+  return {
+    session,
+    report: readDiscoveryReport(root, session.reportId ?? session.id),
+  };
+}
+
+export function recordDiscoveryReaction(
+  root: string,
+  sessionId: string,
+  input: DiscoveryReactionRequest,
+): DiscoverySessionRecord {
+  ensureAftertasteWorkspace(root);
+  const session = readDiscoverySession(root, sessionId);
+  if (!session.items.some((item) => item.id === input.itemId)) {
+    throw new Error(`discovery item not found: ${input.itemId}`);
+  }
+  const vote = normalizeDiscoveryVote(input.vote);
+  const createdAt = new Date().toISOString();
+  const reaction: DiscoveryReaction = {
+    id: `rxn-${createdAt.replace(/[-:.TZ]/g, "").slice(0, 14)}-${crypto.randomBytes(2).toString("hex")}`,
+    itemId: input.itemId,
+    vote,
+    intensity: normalizeDiscoveryIntensity(input.intensity),
+    note: (input.note ?? "").trim(),
+    createdAt,
+  };
+  const next: DiscoverySessionRecord = {
+    ...session,
+    reactions: [...session.reactions.filter((existing) => existing.itemId !== reaction.itemId), reaction],
+    status: session.status === "reported" ? "active" : session.status,
+    reportId: session.status === "reported" ? null : session.reportId,
+    updatedAt: createdAt,
+  };
+  writeDiscoverySession(root, next);
+  return next;
+}
+
+export async function generateDiscoveryReport(root: string, sessionId: string): Promise<DiscoverySessionResponse> {
+  ensureAftertasteWorkspace(root);
+  const session = readDiscoverySession(root, sessionId);
+  const references = readCompiledReferences(root);
+  const context = buildDiscoveryReportContext(session, references);
+  const generatedAt = new Date().toISOString();
+  const llmDraft = await generateDiscoveryReportDraft(context);
+  const fallback = buildFallbackDiscoveryReport(session, references, generatedAt);
+  const report: DiscoveryReport = {
+    ...fallback,
+    ...(llmDraft ?? {}),
+    id: `${session.id}-report`,
+    sessionId: session.id,
+    citedItemIds: normalizeDiscoveryCitations(llmDraft?.citedItemIds ?? fallback.citedItemIds, session.items),
+    generatedAt,
+  };
+  const updated: DiscoverySessionRecord = {
+    ...session,
+    status: "reported",
+    reportId: report.id,
+    updatedAt: generatedAt,
+  };
+  writeJson(discoveryReportPath(root, report.id), report);
+  writeDiscoverySession(root, updated);
+  appendLog(root, `## [${timeStamp()}] discovery-report | ${session.id} — ${session.title}`);
+  return { session: updated, report };
+}
+
 export async function generateIdeas(root: string, request: IdeaRequest): Promise<IdeaResponse> {
   ensureAftertasteWorkspace(root);
   const snapshot = getCurrentSnapshot(root);
@@ -903,6 +1034,238 @@ export async function generateIdeas(root: string, request: IdeaRequest): Promise
     `## [${timeStamp()}] ideas | ${request.outputType} — ${selected.length} references used${brief ? ` | brief ${brief.id}` : ""}`,
   );
   return response;
+}
+
+function buildDiscoveryItems(root: string, sessionId: string, inputs: DiscoveryItemInput[]): DiscoveryItem[] {
+  const references = readCompiledReferences(root);
+  const referenceById = new Map(references.map((reference) => [reference.id, reference] as const));
+  const assetDir = path.join(getAftertastePaths(root).outputsDiscoveryDir, "assets", sessionId);
+  return inputs
+    .map((input, index): DiscoveryItem | null => {
+      const reference = input.referenceId ? referenceById.get(input.referenceId) : null;
+      const asset = input.asset ? writeAssets(assetDir, [input.asset])[0] ?? null : null;
+      const sourceUrl = reference?.sourceUrl ?? normalizeOptionalDiscoveryUrl(input.sourceUrl);
+      const title = (input.title ?? reference?.title ?? asset?.originalName ?? sourceUrl ?? "").trim();
+      if (!title) return null;
+      const platform = (input.platform ?? reference?.platform ?? (sourceUrl ? detectPlatform(sourceUrl) : "Uploaded media")).trim();
+      const tags = uniqueStrings([
+        ...(input.tags ?? []).map((tag) => tag.trim()).filter(Boolean),
+        ...(reference ? [
+          ...reference.themes.slice(0, 2).map((signal) => signal.label),
+          ...reference.motifs.slice(0, 2).map((signal) => signal.label),
+          ...reference.toneSignals.slice(0, 1).map((signal) => signal.label),
+        ] : []),
+      ]).slice(0, 8);
+      return {
+        id: `item-${String(index + 1).padStart(2, "0")}-${crypto.randomBytes(2).toString("hex")}`,
+        referenceId: reference?.id ?? null,
+        sourceUrl,
+        title,
+        platform: platform || "Reference",
+        thumbnailLabel: reference?.thumbnailLabel ?? platform ?? null,
+        thumbnailAssetId: reference?.thumbnailAssetId ?? null,
+        asset: asset ? { ...asset, path: toRel(root, asset.path) } : null,
+        tags,
+      };
+    })
+    .filter((item): item is DiscoveryItem => item !== null)
+    .slice(0, 48);
+}
+
+function normalizeOptionalDiscoveryUrl(value: string | null | undefined): string | null {
+  if (!value?.trim()) return null;
+  return normalizeSourceUrl(value.trim());
+}
+
+function normalizeDiscoveryDuration(value: number | undefined): number {
+  if (!Number.isFinite(value)) return 20;
+  return Math.min(60, Math.max(5, Math.round(value ?? 20)));
+}
+
+function normalizeDiscoveryVote(value: unknown): DiscoveryReaction["vote"] {
+  if (value === "like" || value === "dislike" || value === "save" || value === "not-this") return value;
+  throw new Error("vote must be like, dislike, save, or not-this");
+}
+
+function normalizeDiscoveryIntensity(value: number | undefined): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(5, Math.max(1, Math.round(value ?? 1)));
+}
+
+function readDiscoverySession(root: string, sessionId: string): DiscoverySessionRecord {
+  const filePath = discoverySessionPath(root, sessionId);
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`discovery session not found: ${sessionId}`);
+  }
+  return withDiscoverySessionDefaults(readJson<DiscoverySessionRecord>(filePath));
+}
+
+function writeDiscoverySession(root: string, session: DiscoverySessionRecord): void {
+  writeJson(discoverySessionPath(root, session.id), session);
+}
+
+function readDiscoveryReport(root: string, reportId: string | null): DiscoveryReport | null {
+  if (!reportId) return null;
+  const filePath = discoveryReportPath(root, reportId);
+  return fs.existsSync(filePath) ? readJson<DiscoveryReport>(filePath) : null;
+}
+
+function discoverySessionPath(root: string, sessionId: string): string {
+  return path.join(getAftertastePaths(root).outputsDiscoveryDir, `${sessionId}.json`);
+}
+
+function discoveryReportPath(root: string, reportId: string): string {
+  return path.join(getAftertastePaths(root).outputsDiscoveryDir, `${reportId}.json`);
+}
+
+function withDiscoverySessionDefaults(session: DiscoverySessionRecord): DiscoverySessionRecord {
+  return {
+    ...session,
+    clientName: session.clientName ?? "",
+    prompt: session.prompt ?? "React to each reference based on whether it feels right for this campaign.",
+    durationTargetMinutes: normalizeDiscoveryDuration(session.durationTargetMinutes),
+    status: session.status === "reported" ? "reported" : "active",
+    items: Array.isArray(session.items) ? session.items : [],
+    reactions: Array.isArray(session.reactions) ? session.reactions : [],
+    reportId: session.reportId ?? null,
+  };
+}
+
+function buildDiscoveryReportContext(session: DiscoverySessionRecord, references: ReferenceSummary[]): Record<string, unknown> {
+  const referenceById = new Map(references.map((reference) => [reference.id, reference] as const));
+  return {
+    session: {
+      id: session.id,
+      title: session.title,
+      clientName: session.clientName,
+      campaignGoal: session.campaignGoal,
+      prompt: session.prompt,
+      durationTargetMinutes: session.durationTargetMinutes,
+    },
+    items: session.items.map((item) => {
+      const reference = item.referenceId ? referenceById.get(item.referenceId) : null;
+      const reaction = session.reactions.find((candidate) => candidate.itemId === item.id) ?? null;
+      return {
+        id: item.id,
+        title: item.title,
+        platform: item.platform,
+        sourceUrl: item.sourceUrl,
+        tags: item.tags,
+        reaction,
+        reference: reference
+          ? {
+            id: reference.id,
+            summary: reference.summary,
+            note: reference.note,
+            themes: reference.themes.map((signal) => signal.label),
+            motifs: reference.motifs.map((signal) => signal.label),
+            tone: reference.toneSignals.map((signal) => signal.label),
+            visual: reference.visualSignals.map((signal) => signal.label),
+            story: reference.storySignals.map((signal) => signal.label),
+            openQuestions: reference.openQuestions,
+            contradictions: reference.contradictions,
+          }
+          : null,
+      };
+    }),
+  };
+}
+
+function buildFallbackDiscoveryReport(
+  session: DiscoverySessionRecord,
+  references: ReferenceSummary[],
+  generatedAt: string,
+): DiscoveryReport {
+  const referenceById = new Map(references.map((reference) => [reference.id, reference] as const));
+  const reactionByItem = new Map(session.reactions.map((reaction) => [reaction.itemId, reaction] as const));
+  const liked = session.items.filter((item) => {
+    const vote = reactionByItem.get(item.id)?.vote;
+    return vote === "like" || vote === "save";
+  });
+  const rejected = session.items.filter((item) => {
+    const vote = reactionByItem.get(item.id)?.vote;
+    return vote === "dislike" || vote === "not-this";
+  });
+  const likedLabels = summarizeDiscoveryLabels(liked, referenceById);
+  const rejectedLabels = summarizeDiscoveryLabels(rejected, referenceById);
+  const likedText = likedLabels.slice(0, 3).join(", ") || "the saved references";
+  const rejectedText = rejectedLabels.slice(0, 3).join(", ") || "the references that felt off";
+  const citedItemIds = normalizeDiscoveryCitations(
+    [...liked, ...session.items.filter((item) => reactionByItem.get(item.id)?.vote === "save"), ...session.items].map((item) => item.id),
+    session.items,
+  ).slice(0, 8);
+  const openQuestions = uniqueStrings([
+    ...liked.flatMap((item) => {
+      const reference = item.referenceId ? referenceById.get(item.referenceId) : null;
+      return reference?.openQuestions ?? [];
+    }),
+    `Which liked reference is closest to the final campaign's actual appetite?`,
+    `Where should the team avoid copying the reference too literally?`,
+  ]).slice(0, 5);
+
+  return {
+    id: `${session.id}-report`,
+    sessionId: session.id,
+    summary: `This discovery session could point toward ${likedText} while keeping distance from ${rejectedText}. The useful next move is to treat the strongest reactions as alignment evidence for the call, not as a finished creative direction.`,
+    likedPatterns: likedLabels.length > 0
+      ? likedLabels.map((label) => `A repeated pull toward ${label}.`).slice(0, 6)
+      : ["The strongest positive signals are still sparse; the call may need one sharper example before creative direction is locked."],
+    rejectedPatterns: rejectedLabels.length > 0
+      ? rejectedLabels.map((label) => `A visible boundary around ${label}.`).slice(0, 6)
+      : ["No clear rejection pattern has formed yet."],
+    tensions: buildDiscoveryTensions(likedLabels, rejectedLabels),
+    openQuestions,
+    recommendedDirections: [
+      `One possibility is to build the pitch around ${likedText} and use the cited references as alignment anchors.`,
+      `This could become a moodboard section that separates what to borrow structurally from what to avoid tonally.`,
+      `A useful call shape might start with the highest-intensity saves, then test the boundary around ${rejectedText}.`,
+    ].slice(0, 3),
+    citedItemIds,
+    generatedAt,
+  };
+}
+
+function summarizeDiscoveryLabels(
+  items: DiscoveryItem[],
+  referenceById: Map<string, ReferenceSummary>,
+): string[] {
+  const labels = new Map<string, number>();
+  for (const item of items) {
+    for (const tag of item.tags) {
+      labels.set(tag, (labels.get(tag) ?? 0) + 1);
+    }
+    const reference = item.referenceId ? referenceById.get(item.referenceId) : null;
+    if (!reference) continue;
+    for (const signal of [
+      ...reference.themes,
+      ...reference.motifs,
+      ...reference.toneSignals,
+      ...reference.visualSignals,
+      ...reference.storySignals,
+    ]) {
+      labels.set(signal.label, (labels.get(signal.label) ?? 0) + signal.score);
+    }
+  }
+  return [...labels.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([label]) => label)
+    .slice(0, 8);
+}
+
+function buildDiscoveryTensions(likedLabels: string[], rejectedLabels: string[]): string[] {
+  const overlap = likedLabels.filter((label) => rejectedLabels.includes(label));
+  if (overlap.length > 0) {
+    return overlap.slice(0, 3).map((label) => `${label} is both attractive and risky, so the call should clarify what version of it feels usable.`);
+  }
+  if (likedLabels.length > 0 && rejectedLabels.length > 0) {
+    return [`The session seems to pull toward ${likedLabels[0]} while placing a boundary around ${rejectedLabels[0]}.`];
+  }
+  return ["The main tension is not fully visible yet; more rejected examples would make the boundary sharper."];
+}
+
+function normalizeDiscoveryCitations(itemIds: string[], items: DiscoveryItem[]): string[] {
+  const allowed = new Set(items.map((item) => item.id));
+  return uniqueStrings(itemIds.filter((id) => allowed.has(id))).slice(0, 10);
 }
 
 function normalizeSourceUrl(value: string): string {
@@ -944,12 +1307,14 @@ async function fetchUrlMetadata(sourceUrl: string): Promise<UrlMetadata> {
       };
     }
     const html = await response.text();
+    const rawTitle = readMeta(html, "property", "og:title") ?? readMeta(html, "name", "twitter:title") ?? readTitle(html);
+    const rawDescription =
+      readMeta(html, "property", "og:description") ??
+      readMeta(html, "name", "description") ??
+      readMeta(html, "name", "twitter:description");
     return {
-      title: readMeta(html, "property", "og:title") ?? readMeta(html, "name", "twitter:title") ?? readTitle(html),
-      description:
-        readMeta(html, "property", "og:description") ??
-        readMeta(html, "name", "description") ??
-        readMeta(html, "name", "twitter:description"),
+      title: cleanMetadataTitle(sourceUrl, rawTitle),
+      description: normalizeMetadataText(rawDescription),
       canonicalUrl: readCanonicalUrl(html),
       siteName: readMeta(html, "property", "og:site_name"),
       fetchedAt: new Date().toISOString(),
@@ -988,6 +1353,52 @@ async function maybeRefreshCaptureMetadataForAnalysis(root: string, capture: Cap
   return updatedCapture;
 }
 
+async function maybeAcquireCaptureMediaForAnalysis(root: string, capture: CaptureRecord): Promise<CaptureRecord> {
+  const hasMediaByteAttempt = (capture.acquisitionAttempts ?? []).some(
+    (attempt) =>
+      attempt.target === "media-bytes"
+      && (attempt.status === "ok" || attempt.status === "partial" || attempt.status === "pending"),
+  );
+  if (hasMediaByteAttempt || capture.assets.length > 0 || capture.assets.some((asset) => asset.origin === "source-download")) {
+    return capture;
+  }
+
+  const acquisition = await acquireSourceMediaViaCobalt({
+    assetDir: path.join(getAftertastePaths(root).rawMediaDir, capture.id),
+    sourceUrl: capture.sourceUrl,
+    acquiredAt: new Date().toISOString(),
+  });
+  if (!acquisition) return capture;
+
+  const updatedCapture: CaptureRecord = {
+    ...capture,
+    assets: [
+      ...capture.assets,
+      ...acquisition.assets.map((asset) => ({
+        ...asset,
+        path: toRel(root, asset.path),
+      })),
+    ],
+    acquisitionAttempts: mergeAcquisitionAttempts(
+      capture.acquisitionAttempts ?? deriveInitialAcquisitionAttempts(capture.sourceUrl, capture.assets, capture.createdAt),
+      [acquisition.attempt],
+    ),
+    rawPaths: {
+      ...capture.rawPaths,
+      assetsDir: capture.rawPaths.assetsDir ?? (acquisition.assets.length > 0 ? toRel(root, path.dirname(acquisition.assets[0]!.path)) : null),
+    },
+  };
+  updatedCapture.acquisition = summarizeCaptureAcquisition(updatedCapture.acquisitionAttempts ?? []);
+  updatedCapture.acquisitionCoverage = determineAcquisitionCoverage(
+    updatedCapture.acquisitionAttempts ?? [],
+    updatedCapture.metadata.status,
+  );
+
+  writeJson(path.join(root, updatedCapture.rawPaths.capture), updatedCapture);
+  writeText(path.join(root, updatedCapture.rawPaths.inbox), buildInboxMarkdown(updatedCapture));
+  return updatedCapture;
+}
+
 function readMeta(html: string, attr: string, key: string): string | null {
   const pattern = new RegExp(`<meta[^>]*${attr}=["']${escapeRegex(key)}["'][^>]*content=["']([^"']+)["'][^>]*>`, "i");
   const reversedPattern = new RegExp(`<meta[^>]*content=["']([^"']+)["'][^>]*${attr}=["']${escapeRegex(key)}["'][^>]*>`, "i");
@@ -1004,13 +1415,75 @@ function readTitle(html: string): string | null {
   return decodeEntities(pattern.exec(html)?.[1] ?? "") || null;
 }
 
+function cleanMetadataTitle(sourceUrl: string, value: string | null | undefined): string | null {
+  const normalized = normalizeMetadataText(value);
+  if (!normalized) return null;
+  if (detectPlatform(sourceUrl) !== "Instagram") return normalized;
+
+  const withoutPrefix = normalized.replace(/^[^:]{1,120}\s+on Instagram:\s*/i, "").trim();
+  const concise = buildConciseMetadataTitle(withoutPrefix, 84);
+  return concise || "Instagram reference";
+}
+
+function buildConciseMetadataTitle(value: string, max: number): string {
+  const cleaned = normalizeMetadataText(value)?.replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, "").trim() ?? "";
+  if (!cleaned) return "";
+  const sentence = cleaned
+    .split(/(?<=[.!?])\s+/)
+    .map((segment) => segment.trim())
+    .find((segment) => segment.split(/\s+/).length >= 3)
+    ?? cleaned;
+  const clause = sentence
+    .split(/\s+[—–-]\s+|:\s+|;\s+/)
+    .map((segment) => segment.trim())
+    .find((segment) => segment.split(/\s+/).length >= 3)
+    ?? sentence;
+  return truncateInline(clause.replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, "").trim(), max);
+}
+
+function normalizeMetadataText(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const normalized = decodeEntities(value)
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized || null;
+}
+
 function decodeEntities(value: string): string {
+  const namedEntities: Record<string, string> = {
+    amp: "&",
+    quot: '"',
+    apos: "'",
+    lt: "<",
+    gt: ">",
+    nbsp: " ",
+    ldquo: "“",
+    rdquo: "”",
+    lsquo: "‘",
+    rsquo: "’",
+    hellip: "…",
+  };
   return value
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
+    .replace(/&#x([0-9a-f]+);/gi, (_match, hex: string) => {
+      const codePoint = Number.parseInt(hex, 16);
+      if (!Number.isFinite(codePoint)) return "";
+      try {
+        return String.fromCodePoint(codePoint);
+      } catch {
+        return "";
+      }
+    })
+    .replace(/&#(\d+);/g, (_match, decimal: string) => {
+      const codePoint = Number.parseInt(decimal, 10);
+      if (!Number.isFinite(codePoint)) return "";
+      try {
+        return String.fromCodePoint(codePoint);
+      } catch {
+        return "";
+      }
+    })
+    .replace(/&([a-z]+);/gi, (match, name: string) => namedEntities[name.toLowerCase()] ?? match)
     .trim();
 }
 
@@ -1053,6 +1526,7 @@ function writeAssets(dir: string, inputs: CaptureAssetInput[]): CaptureAsset[] {
       size: input.size ?? content.byteLength,
       path: fullPath,
       kind: classifyAsset(input.mediaType),
+      origin: "user-upload",
     };
   });
 }
@@ -1109,12 +1583,16 @@ function deriveInitialCaptureAcquisitionState(
   assets: CaptureAsset[],
   createdAt: string,
   metadataStatus: UrlMetadata["status"],
+  additions: CaptureAcquisitionAttemptRecord[] = [],
 ): {
   acquisition: CaptureAcquisitionRecord;
   coverage: CaptureAcquisitionCoverage;
   attempts: CaptureAcquisitionAttemptRecord[];
 } {
-  const attempts = deriveInitialAcquisitionAttempts(sourceUrl, assets, createdAt);
+  const attempts = mergeAcquisitionAttempts(
+    deriveInitialAcquisitionAttempts(sourceUrl, assets, createdAt),
+    additions,
+  );
   return {
     acquisition: summarizeCaptureAcquisition(attempts),
     coverage: determineAcquisitionCoverage(attempts, metadataStatus),
@@ -1127,6 +1605,23 @@ function deriveInitialAcquisitionAttempts(
   assets: CaptureAsset[],
   createdAt: string,
 ): CaptureAcquisitionAttemptRecord[] {
+  const hasSourceDownloadedAssets = assets.some((asset) => asset.origin === "source-download");
+  if (hasSourceDownloadedAssets) {
+    return [
+      buildAcquisitionAttempt({
+        target: "media-bytes",
+        mode: "best-effort-extractor",
+        status: "ok",
+        provider: "cobalt",
+        acquiredAt: createdAt,
+        sourceUrl,
+        notes: [
+          "Capture includes source media bytes downloaded through cobalt.",
+        ],
+      }),
+    ];
+  }
+
   if (assets.length > 0) {
     if (isInstagramReelUrl(sourceUrl)) {
       return [
@@ -1341,15 +1836,19 @@ function deriveTranscriptAcquisitionAttempt(
   }
 
   if (transcriptArtifact.source === "audio-upload") {
+    const inheritedMode = capture.acquisition?.provider === "cobalt" ? "best-effort-extractor" : "user-upload";
+    const inheritedProvider = capture.acquisition?.provider === "cobalt" ? "cobalt" : "local-upload";
     return buildAcquisitionAttempt({
       target: "transcript-text",
-      mode: "user-upload",
+      mode: inheritedMode,
       status: transcriptArtifact.status,
-      provider: "local-upload",
+      provider: inheritedProvider,
       acquiredAt: transcriptArtifact.generatedAt,
       sourceUrl: capture.sourceUrl,
       notes: uniqueStrings([
-        "Transcript was recovered from locally uploaded audio bytes.",
+        inheritedProvider === "cobalt"
+          ? "Transcript was recovered from source media bytes downloaded through cobalt."
+          : "Transcript was recovered from locally uploaded media bytes.",
         ...transcriptArtifact.provenance.notes,
       ]),
       error: transcriptArtifact.error,
@@ -1655,25 +2154,25 @@ function summarizeCapture(
   const themeLabel = themes[0]?.label?.toLowerCase() ?? null;
   const motifLabel = motifs[0]?.label?.toLowerCase() ?? null;
   const formatLabel = formats[0]?.label?.toLowerCase() ?? null;
-  let readSentence = " It is still collecting stronger formal signal from the saved context.";
+  let readSentence = " In the archive, it still reads more like an early seed than a settled canon page.";
   if (themeLabel) {
     const readParts = [
       themeLabel,
       motifLabel ? `through ${motifLabel}` : null,
       formatLabel ? `in a ${formatLabel}` : null,
     ].filter((part): part is string => Boolean(part));
-    readSentence = ` It reads as ${readParts.join(" ")}${creators[0]?.label ? ` with a pull toward ${creators[0]!.label}` : ""}.`;
+    readSentence = ` In the archive, it reads like a reference for ${readParts.join(" ")}${creators[0]?.label ? ` with a pull toward ${creators[0]!.label}` : ""}.`;
   } else if (motifLabel && formatLabel) {
-    readSentence = ` It leans through ${motifLabel} in a ${formatLabel}.${creators[0]?.label ? ` There is also a pull toward ${creators[0]!.label}.` : ""}`;
+    readSentence = ` In the archive, it matters less as a topic and more as a ${formatLabel} reference carried through ${motifLabel}.${creators[0]?.label ? ` There is also a pull toward ${creators[0]!.label}.` : ""}`;
   } else if (motifLabel) {
-    readSentence = ` Its clearest craft cue is ${motifLabel}.${creators[0]?.label ? ` There is also a pull toward ${creators[0]!.label}.` : ""}`;
+    readSentence = ` In the archive, its clearest reusable move is ${motifLabel}.${creators[0]?.label ? ` There is also a pull toward ${creators[0]!.label}.` : ""}`;
   } else if (formatLabel) {
-    readSentence = ` Its clearest formal cue is ${formatLabel}.${creators[0]?.label ? ` There is also a pull toward ${creators[0]!.label}.` : ""}`;
+    readSentence = ` In the archive, its clearest role is as a ${formatLabel} container.${creators[0]?.label ? ` There is also a pull toward ${creators[0]!.label}.` : ""}`;
   }
-  const toneLabel = extras.toneSignals[0]?.label ? ` The tone lands as ${extras.toneSignals[0]!.label.toLowerCase()}.` : "";
-  const visualLabel = extras.visualSignals[0]?.label ? ` Visually it leans on ${extras.visualSignals[0]!.label.toLowerCase()}.` : "";
-  const audioLabel = extras.audioSignals[0]?.label ? ` Audio-wise it suggests ${extras.audioSignals[0]!.label.toLowerCase()}.` : "";
-  const storyLabel = extras.storySignals[0]?.label ? ` Structurally it feels closest to ${extras.storySignals[0]!.label.toLowerCase()}.` : "";
+  const toneLabel = extras.toneSignals[0]?.label ? ` The emotional temperature lands as ${extras.toneSignals[0]!.label.toLowerCase()}.` : "";
+  const visualLabel = extras.visualSignals[0]?.label ? ` The visible surface leans on ${extras.visualSignals[0]!.label.toLowerCase()}.` : "";
+  const audioLabel = extras.audioSignals[0]?.label ? ` The audio texture suggests ${extras.audioSignals[0]!.label.toLowerCase()}.` : "";
+  const storyLabel = extras.storySignals[0]?.label ? ` The underlying turn feels closest to ${extras.storySignals[0]!.label.toLowerCase()}.` : "";
   return `${lead}${readSentence}${toneLabel}${visualLabel}${audioLabel}${storyLabel}`.trim();
 }
 
@@ -1706,13 +2205,50 @@ function repairReferenceSummary(
     (surfaceSignals.visualSignals.length === 0 && /visually|movement trace|close-up|camera|frame|shot|b-roll/i.test(trimmed)) ||
     (surfaceSignals.audioSignals.length === 0 && /audio-wise|voiceover|ambient audio|room tone|sound/i.test(trimmed)) ||
     (surfaceSignals.pacingSignals.length === 0 && /pacing|lingering|steady build/i.test(trimmed));
-  if (!needsRepair) return trimmed;
-  return summarizeCapture(capture, surfaceSignals.themes, surfaceSignals.motifs, surfaceSignals.formatSignals, surfaceSignals.creatorSignals, {
-    toneSignals: surfaceSignals.toneSignals,
-    visualSignals: surfaceSignals.visualSignals,
-    audioSignals: surfaceSignals.audioSignals,
-    storySignals: surfaceSignals.storySignals,
-  });
+  const summaryText = needsRepair
+    ? summarizeCapture(capture, surfaceSignals.themes, surfaceSignals.motifs, surfaceSignals.formatSignals, surfaceSignals.creatorSignals, {
+      toneSignals: surfaceSignals.toneSignals,
+      visualSignals: surfaceSignals.visualSignals,
+      audioSignals: surfaceSignals.audioSignals,
+      storySignals: surfaceSignals.storySignals,
+    })
+    : normalizeReferenceSummarySentence(trimmed);
+  return personalizeReferenceSummary(capture, summaryText);
+}
+
+function normalizeReferenceSummarySentence(summary: string): string {
+  const trimmed = summary.trim().replace(/\s+/g, " ");
+  if (!trimmed) return "";
+  return trimmed
+    .replace(/^The capture\b/i, "It")
+    .replace(/^This capture\b/i, "It")
+    .replace(/^The post\b/i, "It")
+    .replace(/^The article\b/i, "It")
+    .replace(/^The essay\b/i, "It")
+    .replace(/^The source\b/i, "It");
+}
+
+function personalizeReferenceSummary(capture: CaptureRecord, summary: string): string {
+  const normalized = normalizeReferenceSummarySentence(summary);
+  const anchor = buildSummaryPersonalAnchor(capture);
+  if (!anchor) return normalized;
+  if (!normalized) return anchor;
+  if (normalized.toLowerCase().includes(anchor.toLowerCase())) return normalized;
+  return `${anchor} ${normalized}`;
+}
+
+function buildSummaryPersonalAnchor(capture: CaptureRecord): string {
+  const note = capture.note.trim() || capture.savedReason?.trim() || "";
+  if (note) {
+    return `The personal reason for saving it is right on the page: "${truncateInline(note, 180)}".`;
+  }
+  if (capture.collection) {
+    return `It was filed into ${capture.collection}, which suggests it belongs to a specific thread in the archive rather than a loose one-off save.`;
+  }
+  if (capture.projectIds.length > 0) {
+    return `It is already tied to ${capture.projectIds.join(", ")}, so this page likely matters as working material rather than background inspiration.`;
+  }
+  return "";
 }
 
 function buildTranscript(capture: CaptureRecord, artifact?: TranscriptArtifact | null): string {
@@ -1763,29 +2299,34 @@ function buildAssetInsights(capture: CaptureRecord, mediaAnalysisArtifact?: Medi
 }
 
 function summarizeCaptureLead(capture: CaptureRecord, noteSnippet: string): string {
+  if (noteSnippet) {
+    if (capture.sourceKind === "voice-note") {
+      return `This voice note was kept because it stayed close to ${noteSnippet}.`;
+    }
+    if (capture.sourceKind === "journal") {
+      return `This journal entry was kept because it stayed close to ${noteSnippet}.`;
+    }
+    if (capture.sourceKind === "brief") {
+      return `This brief was kept as working material around ${noteSnippet}.`;
+    }
+    if (capture.sourceKind === "moodboard") {
+      return `This moodboard was kept because it seemed to hold ${noteSnippet}.`;
+    }
+    return `The save note makes the pull pretty explicit: ${noteSnippet}.`;
+  }
   if (capture.sourceKind === "voice-note") {
-    return noteSnippet
-      ? `Captured as a voice note around ${noteSnippet}.`
-      : "Captured as a voice note, so the system is leaning on cadence, metadata, and media cues.";
+    return "This sits in the archive as a voice note, so the meaning is probably in the spoken turn as much as in the topic itself.";
   }
   if (capture.sourceKind === "journal") {
-    return noteSnippet
-      ? `Captured as a journal entry about ${noteSnippet}.`
-      : "Captured as a journal entry, so the system is leaning on whatever reflective context is available.";
+    return "This sits in the archive as a journal entry, so it likely mattered more as a line of thought than as outward-facing reference material.";
   }
   if (capture.sourceKind === "brief") {
-    return noteSnippet
-      ? `Captured as a working brief focused on ${noteSnippet}.`
-      : "Captured as a working brief with sparse detail, so the system is leaning on metadata and constraints.";
+    return "This sits in the archive as a brief, so it is probably being kept for future use rather than for pure inspiration.";
   }
   if (capture.sourceKind === "moodboard") {
-    return noteSnippet
-      ? `Captured as a moodboard around ${noteSnippet}.`
-      : "Captured as a moodboard, so the system is leaning on visual and atmospheric cues.";
+    return "This sits in the archive as a moodboard, so it is probably being kept for atmosphere, material feel, or future visual translation.";
   }
-  return noteSnippet
-    ? `Saved as a reference with a note about ${noteSnippet}.`
-    : "Saved without a note, so the system is leaning on link metadata and media cues.";
+  return "This was saved without a strong personal note, so the archive can only infer its role from the source and the patterns around it.";
 }
 
 function buildAnalysisOpenQuestions(
@@ -2277,10 +2818,11 @@ export function compileQueryIndex(
 ): QueryIndexEntry[] {
   const paths = getAftertastePaths(root);
   const relatedMap = buildRelatedReferenceMap(references, catalysts);
+  const referencesById = new Map(references.map((reference) => [reference.id, reference] as const));
 
   for (const reference of references) {
     reference.relatedReferenceIds = relatedMap.get(reference.id) ?? [];
-    rewriteReferencePage(root, reference);
+    rewriteReferencePage(root, reference, referencesById);
   }
 
   writeJson(paths.referencesJson, references);
@@ -2292,16 +2834,18 @@ export function compileQueryIndex(
 }
 
 function pickReferenceTitle(capture: CaptureRecord): string {
-  if (capture.metadata.title) return capture.metadata.title;
-  if (capture.note) return sentenceCase(truncate(capture.note, 60));
+  const metadataTitle = cleanMetadataTitle(capture.sourceUrl, capture.metadata.title);
+  if (metadataTitle) return metadataTitle;
+  if (capture.note) return decodeEntities(sentenceCase(truncate(capture.note, 60)));
   const pathname = new URL(capture.sourceUrl).pathname.split("/").filter(Boolean).slice(-2).join(" ");
-  return sentenceCase(pathname || `${capture.platform} reference`);
+  return decodeEntities(sentenceCase(pathname || `${capture.platform} reference`));
 }
 
 function buildReferencePage(
   capture: CaptureRecord,
   analysis: AnalysisResult,
   reference: ReferenceSummary,
+  referencesById: Map<string, ReferenceSummary> = new Map(),
 ): string {
   const frontmatter = formatFrontmatter({
     title: reference.title,
@@ -2319,75 +2863,236 @@ function buildReferencePage(
     frontmatter,
     `# ${reference.title}`,
     "",
-    `> Captured from ${capture.platform} on ${capture.createdAt.slice(0, 10)}.`,
+    buildReferenceLeadParagraph(capture, reference),
     "",
-    "## Why It Was Saved",
-    capture.note ? capture.note : "_No note captured. This page leans on metadata and media clues._",
+    "## Why It Lives In The Archive",
+    buildReferencePersonalRead(capture),
     "",
-    "## Capture Context",
-    `- Source kind: ${capture.sourceKind}`,
-    `- Saved reason: ${capture.savedReason ?? "None"}`,
-    `- Collection: ${capture.collection ?? "None"}`,
-    `- Project IDs: ${capture.projectIds.join(", ") || "None"}`,
+    "## What It Seems To Be Carrying",
+    buildReferenceMeaningSection(reference),
     "",
-    "## What It Is Doing",
-    analysis.summary,
+    "## Connections In This Archive",
+    buildReferenceConnections(reference, referencesById),
     "",
-    "## Taste Signals",
-    `- Themes: ${tagLinks(reference.themes, "themes")}`,
-    `- Motifs: ${tagLinks(reference.motifs, "motifs")}`,
-    `- Creator pulls: ${tagLinks(reference.creatorSignals, "creators")}`,
-    `- Format cues: ${tagLinks(reference.formatSignals, "formats")}`,
-    `- Tone: ${reference.toneSignals.map((tag) => tag.label).join(", ") || "None yet"}`,
-    `- Visual: ${reference.visualSignals.map((tag) => tag.label).join(", ") || "None yet"}`,
-    `- Audio: ${reference.audioSignals.map((tag) => tag.label).join(", ") || "None yet"}`,
-    `- Pacing: ${reference.pacingSignals.map((tag) => tag.label).join(", ") || "None yet"}`,
-    `- Story: ${reference.storySignals.map((tag) => tag.label).join(", ") || "None yet"}`,
+    "## Evidence On The Page",
+    buildReferenceEvidenceSection(analysis, reference),
     "",
-    "## Source",
-    `- URL: ${capture.sourceUrl}`,
-    `- Metadata title: ${capture.metadata.title ?? "Unknown"}`,
-    `- Metadata description: ${capture.metadata.description ?? "None"}`,
+    "## Archive Coordinates",
+    buildReferenceCoordinates(reference),
     "",
-    "## Assets",
-    capture.assets.length > 0
-      ? capture.assets.map((asset) => `- ${asset.originalName} (${asset.kind}, ${asset.mediaType})`).join("\n")
-      : "- No uploaded assets.",
+    "## Source Notes",
+    buildReferenceSourceNotes(capture, reference),
     "",
-    "## Analysis Notes",
-    analysis.assetInsights.map((line) => `- ${line}`).join("\n"),
-    "",
-    "## Moments",
-    reference.moments.length > 0
-      ? reference.moments.map((moment) => `- **${moment.label}:** ${moment.description}`).join("\n")
-      : "- No scene-level moments were surfaced yet.",
-    "",
-    "## Data Gaps",
-    reference.openQuestions.length > 0
-      ? reference.openQuestions.map((question) => `- ${question}`).join("\n")
-      : "- None currently flagged.",
-    "",
-    "## Tensions",
-    reference.contradictions.length > 0
-      ? reference.contradictions.map((line) => `- ${line}`).join("\n")
-      : "- No strong internal tensions surfaced yet.",
-    "",
-    "## Related References",
-    reference.relatedReferenceIds.length > 0
-      ? reference.relatedReferenceIds
-          .map((id) => `- [[references/${id}|${id}]]`)
-          .join("\n")
-      : "- None linked yet.",
+    "## Open Threads",
+    buildReferenceOpenThreads(reference),
     "",
     "## Provenance",
     `- Source capture IDs: ${reference.provenance.sourceIds.join(", ") || "None"}`,
     `- Source paths: ${reference.provenance.sourcePaths.join(", ") || "None"}`,
     `- Compiled at: ${reference.provenance.compiledAt}`,
     "",
-    "## Related Snapshot",
-    "- [[snapshots/current|Current Taste Snapshot]]",
-    "",
   ].join("\n");
+}
+
+function buildReferenceWikilink(pagePath: string, title: string): string {
+  const target = pagePath.replace(/^wiki\//, "").replace(/\.md$/, "");
+  return `[[${target}|${title}]]`;
+}
+
+function buildReferenceLeadParagraph(capture: CaptureRecord, reference: ReferenceSummary): string {
+  const capturedOn = formatArchiveDate(capture.createdAt);
+  const role = buildReferenceArchiveRole(reference);
+  const note = capture.note.trim()
+    ? `You tagged it with the note "${truncateInline(capture.note.trim(), 180)}".`
+    : "There was no personal note on capture, so the archive is reading it mostly through the source itself.";
+  const connected =
+    reference.relatedReferenceIds.length > 0
+      ? `It already belongs to a live cluster of ${reference.relatedReferenceIds.length} connected reference${reference.relatedReferenceIds.length === 1 ? "" : "s"}, so this page reads like part of a larger world rather than a loose bookmark.`
+      : "It has not connected outward yet, so this page still reads like an early seed waiting for more corroboration.";
+  return `${reference.title} is a reference page captured from ${capture.platform} on ${capturedOn}. ${role} ${note} ${connected}`;
+}
+
+function buildReferenceArchiveRole(reference: ReferenceSummary): string {
+  const themes = formatPlainLabelList(reference.themes.map((signal) => signal.label.toLowerCase()).slice(0, 2));
+  const motifs = formatPlainLabelList(reference.motifs.map((signal) => signal.label.toLowerCase()).slice(0, 2));
+  const story = reference.storySignals[0]?.label?.toLowerCase() ?? null;
+  const format = reference.formatSignals[0]?.label?.toLowerCase() ?? null;
+  if (themes && motifs) {
+    return `Within this archive it currently reads as a page about ${themes}, carried through ${motifs}${format ? ` inside a ${format}` : ""}${story ? ` and turning through ${story}` : ""}.`;
+  }
+  if (themes) {
+    return `Within this archive it currently reads as a page about ${themes}${format ? `, often resolving in a ${format}` : ""}${story ? ` with a ${story} turn` : ""}.`;
+  }
+  if (motifs) {
+    return `Within this archive it matters less as a topic label and more as a usable craft move, especially through ${motifs}${story ? ` with a ${story} shape` : ""}.`;
+  }
+  if (format || story) {
+    return `Within this archive it is acting like a structural reference${format ? ` for ${format}` : ""}${story ? ` with a ${story} arc` : ""}.`;
+  }
+  return "Within this archive it is still more of a seed page than a settled canon page, but there is enough intent here to keep it in play.";
+}
+
+function buildReferencePersonalRead(capture: CaptureRecord): string {
+  const parts: string[] = [];
+  if (capture.note.trim()) {
+    parts.push(`The clearest evidence for why this belongs here is your own language: "${truncateInline(capture.note.trim(), 220)}".`);
+  } else {
+    parts.push("No personal note was captured for this save, so the page is leaning on source text, metadata, and later connections.");
+  }
+  if (capture.savedReason && capture.savedReason.trim() && capture.savedReason.trim() !== capture.note.trim()) {
+    parts.push(`The saved reason also frames it as "${truncateInline(capture.savedReason.trim(), 180)}".`);
+  }
+  if (capture.collection) {
+    parts.push(`You filed it into the ${capture.collection} collection, which gives the page a stronger local context than a generic archive dump.`);
+  }
+  if (capture.projectIds.length > 0) {
+    parts.push(`It is already tied to project context through ${capture.projectIds.join(", ")}.`);
+  }
+  return parts.join(" ");
+}
+
+function buildReferenceMeaningSection(reference: ReferenceSummary): string {
+  const paragraphs = [reference.summary.trim()];
+  const followups: string[] = [];
+  if (reference.themes.length > 0) {
+    followups.push(`The emotional question closest to the surface is ${formatPlainLabelList(reference.themes.map((signal) => signal.label.toLowerCase()).slice(0, 2))}.`);
+  }
+  if (reference.storySignals.length > 0) {
+    followups.push(`Its movement is less static moodboard and more ${formatPlainLabelList(reference.storySignals.map((signal) => signal.label.toLowerCase()).slice(0, 2))}.`);
+  }
+  if (reference.creatorSignals.length > 0 || reference.formatSignals.length > 0) {
+    const creatorText = formatPlainLabelList(reference.creatorSignals.map((signal) => signal.label).slice(0, 2));
+    const formatText = formatPlainLabelList(reference.formatSignals.map((signal) => signal.label.toLowerCase()).slice(0, 2));
+    if (creatorText && formatText) {
+      followups.push(`In practice, the page seems to matter as a ${formatText} reference with a visible pull toward ${creatorText}.`);
+    } else if (creatorText) {
+      followups.push(`It also keeps a visible pull toward ${creatorText}, which helps explain why it stayed memorable enough to save.`);
+    } else if (formatText) {
+      followups.push(`It behaves less like raw inspiration and more like a reusable ${formatText} container.`);
+    }
+  }
+  if (reference.contradictions.length > 0) {
+    followups.push(`One productive tension here is ${reference.contradictions[0]!.replace(/\.$/, "")}.`);
+  }
+  if (followups.length > 0) {
+    paragraphs.push(followups.join(" "));
+  }
+  return paragraphs.join("\n\n");
+}
+
+function buildReferenceConnections(
+  reference: ReferenceSummary,
+  referencesById: Map<string, ReferenceSummary>,
+): string {
+  if (reference.relatedReferenceIds.length === 0) {
+    return [
+      "- No explicit reference links have stabilized yet.",
+      "- The likely next step is for later saves to prove whether this page is a one-off fascination or part of a larger recurring thread.",
+      "- [[snapshots/current|Current Taste Snapshot]]",
+      "- [[style-constitution|Style Constitution]]",
+    ].join("\n");
+  }
+
+  return [
+    ...reference.relatedReferenceIds.slice(0, 6).map((id) => {
+      const related = referencesById.get(id);
+      if (!related) return `- [[references/${id}|${id}]] — linked by the current compile, but not yet described in more detail.`;
+      return `- ${buildReferenceWikilink(related.pagePath, related.title)} — ${buildReferenceConnectionReason(reference, related)}`;
+    }),
+    "- [[snapshots/current|Current Taste Snapshot]]",
+    "- [[style-constitution|Style Constitution]]",
+    "- [[not-me|Not Me]]",
+  ].join("\n");
+}
+
+function buildReferenceConnectionReason(reference: ReferenceSummary, related: ReferenceSummary): string {
+  const facets = deriveReferenceRelationshipFacets(reference, related);
+  if (facets.length > 0) {
+    return `${facets.slice(0, 3).map((facet) => facet.summary).join("; ")}.`;
+  }
+  const sharedStory = sharedSignalLabels(reference.storySignals, related.storySignals);
+  if (sharedStory.length > 0) {
+    return `they turn through ${formatPlainLabelList(sharedStory.map((value) => value.toLowerCase()).slice(0, 2))}.`;
+  }
+  return "the current compile sees them as part of the same emerging cluster even before the connection has a cleaner name.";
+}
+
+function buildReferenceEvidenceSection(analysis: AnalysisResult, reference: ReferenceSummary): string {
+  const lines: string[] = [];
+  if (reference.moments.length > 0) {
+    lines.push(...reference.moments.slice(0, 5).map((moment) => `- **${moment.label}:** ${moment.description}`));
+  }
+  if (analysis.assetInsights.length > 0) {
+    lines.push(...analysis.assetInsights.map((line) => `- ${line}`));
+  }
+  return lines.length > 0 ? lines.join("\n") : "- No grounded moments or analysis notes were surfaced yet.";
+}
+
+function buildReferenceCoordinates(reference: ReferenceSummary): string {
+  return [
+    `- Emotional questions: ${tagLinks(reference.themes, "themes")}`,
+    `- Craft grammar: ${tagLinks(reference.motifs, "motifs")}`,
+    `- Creator pulls: ${tagLinks(reference.creatorSignals, "creators")}`,
+    `- Formal containers: ${tagLinks(reference.formatSignals, "formats")}`,
+    `- Tone and motion: ${formatPlainLabelList([
+      ...reference.toneSignals.map((tag) => tag.label.toLowerCase()),
+      ...reference.pacingSignals.map((tag) => tag.label.toLowerCase()),
+      ...reference.storySignals.map((tag) => tag.label.toLowerCase()),
+    ].slice(0, 4)) || "still emerging"}`,
+    `- Sensory surface: ${formatPlainLabelList([
+      ...reference.visualSignals.map((tag) => tag.label.toLowerCase()),
+      ...reference.audioSignals.map((tag) => tag.label.toLowerCase()),
+    ].slice(0, 4)) || "still emerging"}`,
+  ].join("\n");
+}
+
+function buildReferenceSourceNotes(capture: CaptureRecord, reference: ReferenceSummary): string {
+  const lines = [
+    `- URL: ${capture.sourceUrl}`,
+    `- Captured from ${capture.platform} on ${formatArchiveDate(capture.createdAt)}`,
+    `- Source kind: ${capture.sourceKind}`,
+    `- Metadata title: ${capture.metadata.title ? decodeEntities(capture.metadata.title) : "Unknown"}`,
+    `- Metadata description: ${capture.metadata.description ?? "None"}`,
+    `- Transcript source: ${reference.transcriptSource}`,
+  ];
+  if (capture.assets.length > 0) {
+    lines.push(...capture.assets.map((asset) => `- Asset: ${asset.originalName} (${asset.kind}, ${asset.mediaType})`));
+  } else {
+    lines.push("- Assets: No uploaded assets.");
+  }
+  return lines.join("\n");
+}
+
+function buildReferenceOpenThreads(reference: ReferenceSummary): string {
+  const lines = [
+    ...reference.openQuestions.map((question) => `- ${question}`),
+    ...reference.contradictions.map((line) => `- Tension: ${line}`),
+  ];
+  return lines.length > 0 ? lines.join("\n") : "- No unresolved questions or internal tensions are flagged on this page yet.";
+}
+
+function sharedSignalLabels(left: SignalTag[], right: SignalTag[]): string[] {
+  const rightSlugs = new Set(right.map((signal) => signal.slug));
+  return uniqueStrings(left.filter((signal) => rightSlugs.has(signal.slug)).map((signal) => signal.label));
+}
+
+function formatPlainLabelList(values: string[]): string {
+  const cleaned = uniqueStrings(values.map((value) => value.trim()).filter(Boolean));
+  if (cleaned.length === 0) return "";
+  if (cleaned.length === 1) return cleaned[0]!;
+  if (cleaned.length === 2) return `${cleaned[0]} and ${cleaned[1]}`;
+  return `${cleaned.slice(0, -1).join(", ")}, and ${cleaned[cleaned.length - 1]}`;
+}
+
+function formatArchiveDate(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value.slice(0, 10);
+  return parsed.toLocaleDateString("en-US", {
+    timeZone: "UTC",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
 }
 
 function writeConceptPages(root: string, references: ReferenceSummary[], snapshot: TasteSnapshot): void {
@@ -2531,14 +3236,15 @@ function buildConceptArticleMarkdown(input: ConceptArticleInput, enrichedBody?: 
 function buildConceptLead(kind: ConceptArticleInput["kind"], label: string, references: ReferenceSummary[]): string {
   const count = references.length;
   const motif = references[0]?.motifs[0]?.label?.toLowerCase() ?? "a quiet craft move";
+  const themes = formatPlainLabelList(aggregateSignals(references.flatMap((reference) => reference.themes)).slice(0, 2).map((signal) => signal.label.toLowerCase()));
   if (kind === "theme") {
-    return `${label} is no longer just a tag in this archive. It is one of the emotional questions the references keep coming back to, usually carried through ${motif}.`;
+    return `${label} is one of the archive's recurring emotional questions, showing up across ${count} supporting reference${count === 1 ? "" : "s"} and usually carried through ${motif}.`;
   }
   if (kind === "motif") {
-    return `${label} keeps recurring as a usable piece of grammar across ${count} saved reference${count === 1 ? "" : "s"}. It is less an effect than a way the archive likes to think on screen.`;
+    return `${label} keeps recurring as a usable piece of grammar across ${count} saved reference${count === 1 ? "" : "s"}. It usually carries ${themes || "feeling and intention"} rather than standing alone as surface style.`;
   }
   if (kind === "creator") {
-    return `${label} is showing up less as someone to imitate and more as a recurring pull on pacing, intimacy, and framing decisions.`;
+    return `${label} is showing up less as someone to imitate and more as an influence field on pacing, intimacy, and framing decisions inside the archive.`;
   }
   if (kind === "format") {
     return `${label} is one of the structural containers this archive keeps trusting when it wants feeling and clarity to coexist.`;
@@ -2565,11 +3271,15 @@ function buildConceptRecurringSignals(references: ReferenceSummary[]): string {
   const motifs = aggregateSignals(references.flatMap((reference) => reference.motifs));
   const creators = aggregateSignals(references.flatMap((reference) => reference.creatorSignals));
   const formats = aggregateSignals(references.flatMap((reference) => reference.formatSignals));
+  const noteAnchors = extractVoiceAnchors(references).slice(0, 2);
   const lines = [
-    `- Themes that keep co-occurring: ${formatSignalList(themes, "themes")}`,
-    `- Motifs that keep carrying the page: ${formatSignalList(motifs, "motifs")}`,
-    `- Creator pulls in the supporting set: ${formatSignalList(creators, "creators")}`,
-    `- Formats that recur around it: ${formatSignalList(formats, "formats")}`,
+    `- The strongest neighboring emotional questions are ${formatSignalList(themes, "themes")}.`,
+    `- The page most often arrives through ${formatSignalList(motifs, "motifs")}.`,
+    `- The supporting references keep using ${formatSignalList(formats, "formats")} as the container around it.`,
+    `- Creator gravity in this cluster points toward ${formatSignalList(creators, "creators")}.`,
+    ...(noteAnchors.length > 0
+      ? [`- In your own saved language, the surrounding notes keep circling phrases like "${noteAnchors.join("\" and \"")}".`]
+      : []),
   ];
   return lines.join("\n");
 }
@@ -2867,6 +3577,21 @@ function attachCatalystRelations(catalysts: CatalystRecord[]): CatalystRecord[] 
   });
 }
 
+interface ReferenceRelationshipFacet {
+  key:
+    | "shared-question"
+    | "shared-grammar"
+    | "shared-container"
+    | "shared-gravity"
+    | "same-thread"
+    | "same-moment"
+    | "shared-language"
+    | "worldview-to-expression"
+    | "parallel-angle";
+  weight: number;
+  summary: string;
+}
+
 function buildRelatedReferenceMap(
   references: ReferenceSummary[],
   catalysts: CatalystRecord[],
@@ -2919,37 +3644,143 @@ function scoreReferenceSimilarity(
   leftCatalystIds: string[],
   rightCatalystIds: string[],
 ): number {
+  const relationshipFacets = deriveReferenceRelationshipFacets(left, right);
   const catalystOverlap = intersectCount(leftCatalystIds, rightCatalystIds);
-  const themeOverlap = intersectCount(left.themes.map((tag) => tag.slug), right.themes.map((tag) => tag.slug));
-  const motifOverlap = intersectCount(left.motifs.map((tag) => tag.slug), right.motifs.map((tag) => tag.slug));
-  const creatorOverlap = intersectCount(left.creatorSignals.map((tag) => tag.slug), right.creatorSignals.map((tag) => tag.slug));
-  const formatOverlap = intersectCount(left.formatSignals.map((tag) => tag.slug), right.formatSignals.map((tag) => tag.slug));
   const toneOverlap = intersectCount(left.toneSignals.map((tag) => tag.slug), right.toneSignals.map((tag) => tag.slug));
   const storyOverlap = intersectCount(left.storySignals.map((tag) => tag.slug), right.storySignals.map((tag) => tag.slug));
-  const collectionBonus =
-    left.collection && right.collection && sanitizeFileName(left.collection) === sanitizeFileName(right.collection) ? 1.4 : 0;
   const textOverlap = scoreTokenSetOverlap(buildReferenceSearchTokens(left), buildReferenceSearchTokens(right));
   const recencyTiebreaker = Math.max(0, 0.4 - referenceAgeDistance(left, right) / 120);
+  const relationshipScore = relationshipFacets.reduce((sum, facet) => sum + facet.weight, 0);
 
   return Number((
-    catalystOverlap * 4 +
-    themeOverlap * 3 +
-    motifOverlap * 2.5 +
-    creatorOverlap * 2 +
-    formatOverlap * 1.5 +
+    catalystOverlap * 3.2 +
+    relationshipScore +
     toneOverlap * 1.35 +
     storyOverlap * 1.35 +
-    textOverlap * 3.2 +
-    collectionBonus +
+    textOverlap * 2.8 +
     recencyTiebreaker
   ).toFixed(3));
 }
 
-function rewriteReferencePage(root: string, reference: ReferenceSummary): void {
+function deriveReferenceRelationshipFacets(left: ReferenceSummary, right: ReferenceSummary): ReferenceRelationshipFacet[] {
+  const facets: ReferenceRelationshipFacet[] = [];
+  const sharedThemes = intersectStrings(left.themes.map((theme) => theme.label), right.themes.map((theme) => theme.label));
+  const sharedMotifs = intersectStrings(left.motifs.map((motif) => motif.label), right.motifs.map((motif) => motif.label));
+  const sharedFormats = intersectStrings(left.formatSignals.map((format) => format.label), right.formatSignals.map((format) => format.label));
+  const sharedCreators = intersectStrings(left.creatorSignals.map((creator) => creator.label), right.creatorSignals.map((creator) => creator.label));
+  const sharedProjects = intersectStrings(left.projectIds, right.projectIds);
+  const sharedCollection =
+    left.collection && right.collection && sanitizeFileName(left.collection) === sanitizeFileName(right.collection)
+      ? left.collection
+      : null;
+  const leftNoteOverlap = scoreTokenSetOverlap(tokenizeSearchText(left.note), tokenizeSearchText(right.note));
+
+  if (sharedThemes.length > 0) {
+    facets.push({
+      key: "shared-question",
+      weight: 4.2,
+      summary: `both pages are orbiting ${formatPlainLabelList(sharedThemes.slice(0, 2))}`,
+    });
+  }
+  if (sharedMotifs.length > 0) {
+    facets.push({
+      key: "shared-grammar",
+      weight: 3.3,
+      summary: `they carry that through ${formatPlainLabelList(sharedMotifs.slice(0, 2).map((value) => value.toLowerCase()))}`,
+    });
+  }
+  if (sharedFormats.length > 0) {
+    facets.push({
+      key: "shared-container",
+      weight: 2.3,
+      summary: `they trust the same container: ${formatPlainLabelList(sharedFormats.slice(0, 2).map((value) => value.toLowerCase()))}`,
+    });
+  }
+  if (sharedCreators.length > 0) {
+    facets.push({
+      key: "shared-gravity",
+      weight: 2.5,
+      summary: `they both feel a pull toward ${formatPlainLabelList(sharedCreators.slice(0, 2))}`,
+    });
+  }
+  if (sharedCollection || sharedProjects.length > 0) {
+    facets.push({
+      key: "same-thread",
+      weight: 3.1,
+      summary: sharedCollection
+        ? `they live inside the same ${sharedCollection} thread`
+        : `they are already tied to the same project thread: ${formatPlainLabelList(sharedProjects.slice(0, 2))}`,
+    });
+  }
+  if (leftNoteOverlap >= 0.16) {
+    facets.push({
+      key: "shared-language",
+      weight: 2.2,
+      summary: "your own saved notes talk about them in almost the same language",
+    });
+  }
+  if (referenceAgeDistance(left, right) <= 7 && scoreTokenSetOverlap(buildReferenceSearchTokens(left), buildReferenceSearchTokens(right)) >= 0.14) {
+    facets.push({
+      key: "same-moment",
+      weight: 1.8,
+      summary: "they look like part of the same moment of thinking rather than unrelated saves",
+    });
+  }
+  if (sharedThemes.length > 0 && (readsLikeWorldviewReference(left) !== readsLikeWorldviewReference(right) || pairSuggestsWorldviewExpression(left, right))) {
+    facets.push({
+      key: "worldview-to-expression",
+      weight: 2.9,
+      summary: "one reads more like the worldview and the other more like the practical expression of it",
+    });
+  }
+  if (sharedThemes.length > 0 && (sharedMotifs.length === 0 || sharedFormats.length === 0)) {
+    facets.push({
+      key: "parallel-angle",
+      weight: 2.1,
+      summary: "they approach the same question from different angles",
+    });
+  }
+
+  return facets
+    .sort((a, b) => b.weight - a.weight || a.key.localeCompare(b.key))
+    .slice(0, 4);
+}
+
+function readsLikeWorldviewReference(reference: ReferenceSummary): boolean {
+  const personalLanguage = `${reference.note} ${reference.summary} ${reference.title}`.toLowerCase();
+  const worldviewCue =
+    /\b(worldview|philosophy|framework|how i think|way of thinking|authorship|what making means|mind frame)\b/i.test(personalLanguage);
+  return (
+    worldviewCue
+    || reference.sourceKind === "journal"
+    || reference.sourceKind === "voice-note"
+    || reference.transcriptSource === "web-article"
+    || reference.transcriptSource === "podcast-page"
+    || reference.transcriptSource === "podcast-rss"
+    || (reference.assetCount === 0 && reference.storySignals.some((signal) => signal.slug === "observation" || signal.slug === "instruction"))
+  );
+}
+
+function pairSuggestsWorldviewExpression(left: ReferenceSummary, right: ReferenceSummary): boolean {
+  const leftText = `${left.note} ${left.summary} ${left.title}`.toLowerCase();
+  const rightText = `${right.note} ${right.summary} ${right.title}`.toLowerCase();
+  const worldviewPattern = /\b(worldview|philosophy|framework|how i think|mind frame)\b/i;
+  const expressionPattern = /\b(visual expression|practical expression|visual language|on screen|reel|shot|frame|close-up|montage)\b/i;
+  return (
+    (worldviewPattern.test(leftText) && expressionPattern.test(rightText))
+    || (worldviewPattern.test(rightText) && expressionPattern.test(leftText))
+  );
+}
+
+function rewriteReferencePage(
+  root: string,
+  reference: ReferenceSummary,
+  referencesById: Map<string, ReferenceSummary> = new Map(),
+): void {
   const capture = readCapture(root, reference.id);
   const analysis = readAnalysis(root, reference.id);
   if (!analysis) return;
-  writeText(path.join(root, reference.pagePath), buildReferencePage(capture, analysis, reference));
+  writeText(path.join(root, reference.pagePath), buildReferencePage(capture, analysis, reference, referencesById));
 }
 
 function buildStaticQueryEntry(
@@ -3275,6 +4106,7 @@ export function getWikiArticleDetail(root: string, articlePath: string): WikiArt
     ...parsed.frontmatterReferences,
     ...extractReferenceIdsFromText(parsed.body),
   ]);
+  const referencesById = new Map(readCompiledReferences(root).map((reference) => [reference.id, reference] as const));
   const relatedPaths = uniqueStrings(
     extractWikiLinks(parsed.body)
       .map((target) => resolveWikiTarget(root, target))
@@ -3298,6 +4130,14 @@ export function getWikiArticleDetail(root: string, articlePath: string): WikiArt
     backlinks,
     relatedPaths,
     supportingReferenceIds,
+    supportingReferences: supportingReferenceIds.map((id) => {
+      const reference = referencesById.get(id);
+      return {
+        id,
+        title: reference?.title ?? id,
+        path: reference?.pagePath ?? `wiki/references/${id}.md`,
+      };
+    }),
     tensions: extractBulletSection(parsed.sections, "Tensions")
       .concat(extractBulletSection(parsed.sections, "Tensions And Boundaries"))
       .slice(0, 6),
@@ -3574,8 +4414,10 @@ function parseMarkdownArticle(raw: string): {
     body = raw.slice(frontmatterMatch[0].length);
   }
   const lines = body.split("\n");
-  const title = lines.find((line) => line.startsWith("# "))?.replace(/^#\s+/, "").trim()
-    || (typeof frontmatter.title === "string" ? frontmatter.title : "Untitled");
+  const title = decodeEntities(
+    lines.find((line) => line.startsWith("# "))?.replace(/^#\s+/, "").trim()
+      || (typeof frontmatter.title === "string" ? frontmatter.title : "Untitled"),
+  );
 
   const sectionMatches = [...body.matchAll(/^##\s+(.+)$/gm)];
   const leadStart = lines.findIndex((line) => line.startsWith("# "));
@@ -3646,11 +4488,13 @@ function extractWikiLinks(content: string): string[] {
 }
 
 function extractReferenceIdsFromText(content: string): string[] {
+  const referenceIdPattern = /^\d{8}T\d{6}-[a-z0-9]+$/i;
   return uniqueStrings([
-    ...Array.from(content.matchAll(/\b([a-z0-9]+-[a-z0-9-]+)\b/gi), (match) => match[1]!.trim()),
+    ...Array.from(content.matchAll(/\b(\d{8}T\d{6}-[a-z0-9]+)\b/gi), (match) => match[1]!.trim()),
     ...extractWikiLinks(content)
       .filter((target) => target.startsWith("references/"))
-      .map((target) => path.basename(target)),
+      .map((target) => path.basename(target))
+      .filter((target) => referenceIdPattern.test(target)),
   ]);
 }
 
@@ -3734,6 +4578,7 @@ function buildMissingWikiArticleDetail(root: string, articlePath: string): WikiA
     backlinks,
     relatedPaths,
     supportingReferenceIds: [],
+    supportingReferences: [],
     tensions: [],
     openQuestions: extractBulletSection(parsed.sections, "Open Questions").slice(0, 6),
     lastCompiledAt: null,
@@ -4086,6 +4931,7 @@ function buildTasteGraph(
         referenceIds: uniqueStrings([...existing.evidence.referenceIds, ...evidence.referenceIds]),
         catalystIds: uniqueStrings([...existing.evidence.catalystIds, ...evidence.catalystIds]),
         explanation: existing.evidence.explanation ?? evidence.explanation,
+        relationKinds: uniqueStrings([...(existing.evidence.relationKinds ?? []), ...(evidence.relationKinds ?? [])]),
       };
       return;
     }
@@ -4099,6 +4945,7 @@ function buildTasteGraph(
         referenceIds: uniqueStrings(evidence.referenceIds),
         catalystIds: uniqueStrings(evidence.catalystIds),
         explanation: evidence.explanation,
+        relationKinds: uniqueStrings(evidence.relationKinds ?? []),
       },
       updatedAt,
     });
@@ -4171,6 +5018,7 @@ function buildTasteGraph(
       const rightCatalystIds = catalystIdsByReferenceId.get(other.id) ?? [];
       const sharedCatalystIds = intersectStrings(leftCatalystIds, rightCatalystIds);
       const rawScore = scoreReferenceSimilarity(reference, other, leftCatalystIds, rightCatalystIds);
+      const relationKinds = deriveReferenceRelationshipFacets(reference, other).map((facet) => facet.key);
       addEdge(
         reference.id,
         other.id,
@@ -4180,6 +5028,7 @@ function buildTasteGraph(
           referenceIds: [reference.id, other.id],
           catalystIds: sharedCatalystIds,
           explanation: describeReferenceRelationship(reference, other, sharedCatalystIds),
+          relationKinds,
         },
         snapshot.generatedAt,
       );
@@ -4196,12 +5045,14 @@ function buildTasteGraph(
           referenceIds: [referenceId],
           catalystIds: [catalyst.id],
           explanation,
+          relationKinds: [],
         }, catalyst.updatedAt);
       } else {
         addEdge(referenceId, catalyst.id, edgeKind, weight, {
           referenceIds: [referenceId],
           catalystIds: [catalyst.id],
           explanation,
+          relationKinds: [],
         }, catalyst.updatedAt);
       }
 
@@ -4210,6 +5061,7 @@ function buildTasteGraph(
           referenceIds: [referenceId],
           catalystIds: [catalyst.id],
           explanation: catalyst.summary,
+          relationKinds: [],
         }, catalyst.updatedAt);
       }
     }
@@ -4219,6 +5071,7 @@ function buildTasteGraph(
         referenceIds: catalyst.referenceIds,
         catalystIds: [catalyst.id],
         explanation: catalyst.summary,
+        relationKinds: [],
       }, catalyst.updatedAt);
     }
   }
@@ -4228,6 +5081,7 @@ function buildTasteGraph(
       referenceIds: [referenceId],
       catalystIds: [],
       explanation: "Included in the current compiled taste snapshot.",
+      relationKinds: [],
     }, snapshot.generatedAt);
   }
 
@@ -4237,6 +5091,7 @@ function buildTasteGraph(
       referenceIds: [],
       catalystIds: [boundaryCatalyst.id],
       explanation: snapshot.antiSignals[0] ?? "Boundary surface attached to the current snapshot.",
+      relationKinds: [],
     }, snapshot.generatedAt);
   }
 
@@ -4246,12 +5101,14 @@ function buildTasteGraph(
         referenceIds: [referenceId],
         catalystIds: catalystIdsByReferenceId.get(referenceId) ?? [],
         explanation: `Brief "${brief.title}" explicitly selected this reference.`,
+        relationKinds: [],
       }, brief.updatedAt);
     }
     addEdge(brief.id, snapshot.id, "belongs_to_snapshot", 0.62, {
       referenceIds: brief.selectedReferenceIds,
       catalystIds: [],
       explanation: "Brief can be interpreted against the current snapshot.",
+      relationKinds: [],
     }, brief.updatedAt);
   }
 
@@ -4261,6 +5118,7 @@ function buildTasteGraph(
         referenceIds: [referenceId],
         catalystIds: session.catalystIds,
         explanation: "This reference was active in the generation session.",
+        relationKinds: [],
       }, session.generatedAt);
     }
     for (const catalystId of session.catalystIds) {
@@ -4268,6 +5126,7 @@ function buildTasteGraph(
         referenceIds: session.referenceIds,
         catalystIds: [catalystId],
         explanation: "This catalyst shaped the recorded creative session.",
+        relationKinds: [],
       }, session.generatedAt);
     }
     if (session.snapshotId) {
@@ -4275,6 +5134,7 @@ function buildTasteGraph(
         referenceIds: session.referenceIds,
         catalystIds: session.catalystIds,
         explanation: "Session was generated against this snapshot.",
+        relationKinds: [],
       }, session.generatedAt);
     }
     if (boundaryCatalyst && session.antiSignals.length > 0) {
@@ -4282,6 +5142,7 @@ function buildTasteGraph(
         referenceIds: session.referenceIds,
         catalystIds: [boundaryCatalyst.id],
         explanation: session.antiSignals[0] ?? "Session recorded an anti-signal.",
+        relationKinds: [],
       }, session.generatedAt);
     }
   }
@@ -4350,20 +5211,13 @@ function describeReferenceRelationship(
   right: ReferenceSummary,
   sharedCatalystIds: string[],
 ): string {
-  const fragments: string[] = [];
-  const sharedThemes = intersectStrings(left.themes.map((theme) => theme.label), right.themes.map((theme) => theme.label));
-  const sharedMotifs = intersectStrings(left.motifs.map((motif) => motif.label), right.motifs.map((motif) => motif.label));
-  const sharedCreators = intersectStrings(left.creatorSignals.map((creator) => creator.label), right.creatorSignals.map((creator) => creator.label));
-  const sharedFormats = intersectStrings(left.formatSignals.map((format) => format.label), right.formatSignals.map((format) => format.label));
-
-  if (sharedThemes.length > 0) fragments.push(`shared themes: ${sharedThemes.slice(0, 2).join(", ")}`);
-  if (sharedMotifs.length > 0) fragments.push(`shared motifs: ${sharedMotifs.slice(0, 2).join(", ")}`);
-  if (sharedCreators.length > 0) fragments.push(`shared creator pulls: ${sharedCreators.slice(0, 2).join(", ")}`);
-  if (sharedFormats.length > 0) fragments.push(`shared formats: ${sharedFormats.slice(0, 2).join(", ")}`);
-  if (sharedCatalystIds.length > 0) fragments.push(`${sharedCatalystIds.length} shared catalyst${sharedCatalystIds.length === 1 ? "" : "s"}`);
-
+  const facets = deriveReferenceRelationshipFacets(left, right);
+  const fragments = facets.slice(0, 3).map((facet) => facet.summary);
+  if (sharedCatalystIds.length > 0) {
+    fragments.push(`${sharedCatalystIds.length} shared catalyst${sharedCatalystIds.length === 1 ? "" : "s"}`);
+  }
   return fragments.length > 0
-    ? `References rhyme through ${fragments.join(" · ")}.`
+    ? `References rhyme because ${fragments.join(" · ")}.`
     : "References were linked by compiled similarity scoring.";
 }
 
@@ -4948,11 +5802,9 @@ function buildSnapshotPage(snapshot: TasteSnapshot): string {
     window_start: snapshot.window.start,
     window_end: snapshot.window.end,
   });
-  const themeBullets = snapshot.themes.map((theme) => `- [[themes/${theme.slug}|${theme.label}]]`).join("\n") || "- None yet.";
-  const motifBullets = snapshot.motifs.map((motif) => `- [[motifs/${motif.slug}|${motif.label}]]`).join("\n") || "- None yet.";
   const referenceBullets =
     snapshot.notableReferences
-      .map((reference) => `- [[references/${reference.id}|${reference.title}]] — ${reference.summary}`)
+      .map((reference) => `- [[references/${reference.id}|${reference.title}]] — ${truncateInline(reference.note.trim() || reference.summary, 150)}`)
       .join("\n") || "- None yet.";
   return [
     frontmatter,
@@ -4960,26 +5812,28 @@ function buildSnapshotPage(snapshot: TasteSnapshot): string {
     "",
     snapshot.summary,
     "",
-    "## Themes",
-    themeBullets,
+    "## Current Arc",
+    `- Window: ${snapshot.window.label}`,
+    `- Emotional questions: ${snapshot.themes.length > 0 ? snapshot.themes.slice(0, 5).map((theme) => `[[themes/${theme.slug}|${theme.label}]]`).join(", ") : "none named yet"}`,
+    `- Craft grammar: ${snapshot.motifs.length > 0 ? snapshot.motifs.slice(0, 5).map((motif) => `[[motifs/${motif.slug}|${motif.label}]]`).join(", ") : "still emerging"}`,
     "",
-    "## Motifs",
-    motifBullets,
-    "",
-    "## Pattern Read",
+    "## Relationship Web",
     snapshot.creatorPatterns.map((pattern) => `- **${pattern.label}:** ${pattern.summary}`).join("\n") || "- None yet.",
     "",
-    "## Tensions",
+    "## Pressure Points",
     snapshot.tensions.map((tension) => `- **${tension.label}:** ${tension.summary}`).join("\n") || "- None yet.",
+    "",
+    "## Anchor References",
+    referenceBullets,
     "",
     "## Open Questions",
     snapshot.openQuestions.map((question) => `- ${question}`).join("\n") || "- None yet.",
     "",
-    "## Anti-Signals",
+    "## Boundaries",
     snapshot.antiSignals.map((line) => `- ${line}`).join("\n") || "- None yet.",
     "",
-    "## Notable References",
-    referenceBullets,
+    "## Where To Push Next",
+    snapshot.underexploredDirections.map((line) => `- ${line}`).join("\n") || "- None yet.",
     "",
     "## Prompt Seeds",
     snapshot.promptSeeds.map((seed) => `- **${seed.title}:** ${seed.prompt}`).join("\n"),
@@ -5007,15 +5861,15 @@ function buildStyleConstitutionPage(references: ReferenceSummary[]): string {
     "",
     references.length === 0
       ? "This page will stabilize as you save more references. Right now it is intentionally sparse."
-      : `Across the current archive, the most stable taste constants are ${themes.slice(0, 2).map((theme) => theme.label.toLowerCase()).join(" and ")} expressed through ${motifs.slice(0, 2).map((motif) => motif.label.toLowerCase()).join(" and ")}.`,
+      : `Across the current archive, the most stable constants are ${formatPlainLabelList(themes.slice(0, 2).map((theme) => theme.label.toLowerCase())) || "still-emerging emotional questions"} expressed through ${formatPlainLabelList(motifs.slice(0, 2).map((motif) => motif.label.toLowerCase())) || "still-emerging craft grammar"}.`,
     "",
-    "## Constants",
+    "## What Keeps Surviving",
     themes.slice(0, 5).map((theme) => `- [[themes/${theme.slug}|${theme.label}]]`).join("\n") || "- None yet.",
     "",
-    "## Craft Preferences",
+    "## How It Usually Moves",
     motifs.slice(0, 5).map((motif) => `- [[motifs/${motif.slug}|${motif.label}]]`).join("\n") || "- None yet.",
     "",
-    "## Structural Defaults",
+    "## Containers It Trusts",
     formats.slice(0, 5).map((format) => `- [[formats/${format.slug}|${format.label}]]`).join("\n") || "- None yet.",
     "",
   ].join("\n");
@@ -5045,38 +5899,50 @@ function buildIndexPage(references: ReferenceSummary[], snapshot: TasteSnapshot)
   const motifs = aggregateSignals(references.flatMap((reference) => reference.motifs));
   const creators = aggregateSignals(references.flatMap((reference) => reference.creatorSignals));
   const formats = aggregateSignals(references.flatMap((reference) => reference.formatSignals));
+  const anchorReferences = (snapshot.notableReferences.length > 0 ? snapshot.notableReferences : references.slice(0, 8))
+    .slice(0, 8)
+    .map((reference) => `- [[references/${reference.id}|${reference.title}]] — ${truncateInline(reference.note.trim() || reference.summary, 140)}`);
   return [
-    "# Index — Aftertaste",
+    "# Aftertaste Main Page",
     "",
-    "> Taste-led knowledge base for creator references, snapshots, and idea prompts.",
+    "> A living wiki for the references, obsessions, and open questions that keep shaping your taste.",
     "",
-    "## Navigation",
+    "## Welcome",
+    snapshot.summary,
+    "",
+    "## Start Here",
     "- [[snapshots/current|Current Taste Snapshot]]",
     "- [[style-constitution|Style Constitution]]",
     "- [[not-me|Not Me]]",
     "",
-    "## References",
-    references.length > 0
-      ? references.slice(0, 20).map((reference) => `- [[references/${reference.id}|${reference.title}]]`).join("\n")
+    "## Current Arc",
+    `- Window: ${snapshot.window.label}`,
+    `- Pressure points: ${snapshot.tensions.length > 0 ? snapshot.tensions.map((tension) => `**${tension.label}**`).join(", ") : "none named yet"}`,
+    `- Open questions: ${snapshot.openQuestions.length > 0 ? snapshot.openQuestions.slice(0, 3).join(" | ") : "still emerging"}`,
+    "",
+    "## Anchor References",
+    anchorReferences.length > 0
+      ? anchorReferences.join("\n")
       : "- *(none yet)*",
     "",
-    "## Themes",
-    themes.length > 0 ? themes.map((theme) => `- [[themes/${theme.slug}|${theme.label}]]`).join("\n") : "- *(none yet)*",
+    "## Relationship Web",
+    snapshot.creatorPatterns.length > 0
+      ? snapshot.creatorPatterns.map((pattern) => `- **${pattern.label}:** ${pattern.summary}`).join("\n")
+      : "- No stable relationship web has surfaced yet.",
     "",
-    "## Motifs",
-    motifs.length > 0 ? motifs.map((motif) => `- [[motifs/${motif.slug}|${motif.label}]]`).join("\n") : "- *(none yet)*",
+    "## Browse The Canon",
+    `- Emotional questions: ${themes.length > 0 ? themes.slice(0, 6).map((theme) => `[[themes/${theme.slug}|${theme.label}]]`).join(", ") : "none yet"}`,
+    `- Craft grammar: ${motifs.length > 0 ? motifs.slice(0, 6).map((motif) => `[[motifs/${motif.slug}|${motif.label}]]`).join(", ") : "none yet"}`,
+    `- Creator pulls: ${creators.length > 0 ? creators.slice(0, 6).map((creator) => `[[creators/${creator.slug}|${creator.label}]]`).join(", ") : "none yet"}`,
+    `- Formal containers: ${formats.length > 0 ? formats.slice(0, 6).map((format) => `[[formats/${format.slug}|${format.label}]]`).join(", ") : "none yet"}`,
     "",
-    "## Creators",
-    creators.length > 0 ? creators.map((creator) => `- [[creators/${creator.slug}|${creator.label}]]`).join("\n") : "- *(none yet)*",
-    "",
-    "## Formats",
-    formats.length > 0 ? formats.map((format) => `- [[formats/${format.slug}|${format.label}]]`).join("\n") : "- *(none yet)*",
-    "",
-    "## Snapshot Notes",
-    `- ${snapshot.summary}`,
+    "## Recent Additions",
+    references.length > 0
+      ? references.slice(0, 8).map((reference) => `- [[references/${reference.id}|${reference.title}]] — captured ${formatArchiveDate(reference.createdAt)}`).join("\n")
+      : "- *(none yet)*",
     ...(
       snapshot.tensions.length > 0
-        ? ["", "## Snapshot Tensions", ...snapshot.tensions.map((tension) => `- ${tension.label}: ${tension.summary}`)]
+        ? ["", "## Named Tensions", ...snapshot.tensions.map((tension) => `- ${tension.label}: ${tension.summary}`)]
         : []
     ),
     "",
@@ -5772,6 +6638,7 @@ function finalizeTranscriptArtifact(
     assets: capture.assets.map((asset) => ({
       id: asset.id,
       kind: asset.kind,
+      origin: asset.origin ?? "user-upload",
       fileName: asset.fileName,
       mediaType: asset.mediaType,
       size: asset.size,
@@ -5819,6 +6686,7 @@ function finalizeMediaAnalysisArtifact(
     assets: capture.assets.map((asset) => ({
       id: asset.id,
       kind: asset.kind,
+      origin: asset.origin ?? "user-upload",
       fileName: asset.fileName,
       mediaType: asset.mediaType,
       size: asset.size,
@@ -6056,8 +6924,8 @@ async function resolveTranscriptArtifact(root: string, capture: CaptureRecord): 
   }
 
   // 4. Uploaded audio transcription
-  const audioArtifact = await tryAudioUploadTranscriptArtifact(root, capture);
-  if (audioArtifact) return audioArtifact;
+  const mediaByteArtifact = await tryLocalMediaTranscriptArtifact(root, capture);
+  if (mediaByteArtifact) return mediaByteArtifact;
 
   if (capture.assets.length > 0) {
     return buildFallbackTranscriptArtifact(capture);
@@ -6068,11 +6936,17 @@ async function resolveTranscriptArtifact(root: string, capture: CaptureRecord): 
   ]);
 }
 
-async function tryAudioUploadTranscriptArtifact(root: string, capture: CaptureRecord): Promise<TranscriptArtifact | null> {
-  const audioAssets = capture.assets.filter((asset) => asset.kind === "audio");
-  if (audioAssets.length === 0) return null;
+async function tryLocalMediaTranscriptArtifact(root: string, capture: CaptureRecord): Promise<TranscriptArtifact | null> {
+  const transcribableAssets = capture.assets.filter((asset) => asset.kind === "audio" || asset.kind === "video");
+  if (transcribableAssets.length === 0) return null;
 
-  const assetPath = path.join(root, audioAssets[0].path);
+  const chosenAsset =
+    transcribableAssets.find((asset) => asset.kind === "audio")
+    ?? transcribableAssets.find((asset) => asset.kind === "video")
+    ?? null;
+  if (!chosenAsset) return null;
+
+  const assetPath = path.join(root, chosenAsset.path);
   try {
     const result = await transcribeAudioFile(assetPath);
     if (!result) return null;
@@ -6081,7 +6955,7 @@ async function tryAudioUploadTranscriptArtifact(root: string, capture: CaptureRe
       text: result.text,
       segments: result.segments,
       language: result.language,
-      notes: [`Transcript generated from uploaded audio via ${result.providerLabel}.`],
+      notes: [`Transcript generated from local ${chosenAsset.kind} bytes via ${result.providerLabel}.`],
     });
   } catch (error) {
     return buildErrorTranscriptArtifact(capture, "audio-upload", error instanceof Error ? error.message : String(error));
@@ -7044,6 +7918,7 @@ function withTasteGraphDefaults(graph: TasteGraph): TasteGraph {
         referenceIds: edge.evidence?.referenceIds ?? [],
         catalystIds: edge.evidence?.catalystIds ?? [],
         explanation: edge.evidence?.explanation ?? null,
+        relationKinds: edge.evidence?.relationKinds ?? [],
       },
       updatedAt: edge.updatedAt ?? new Date().toISOString(),
     })),
