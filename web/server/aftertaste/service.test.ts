@@ -11,10 +11,13 @@ import {
   compileCatalysts,
   compileQueryIndex,
   compileTasteGraph,
+  createDiscoverySession,
   createProjectBrief,
   createCapture,
+  generateDiscoveryReport,
   generateIdeas,
   getCurrentSnapshot,
+  getDiscoverySession,
   getProjectBrief,
   getRelatedReferences,
   getTasteGraph,
@@ -23,6 +26,7 @@ import {
   listProjectBriefs,
   listReferences,
   planWikiCleanup,
+  recordDiscoveryReaction,
   readCreativeSessions,
   runAnalysis,
   searchQueryIndex,
@@ -40,6 +44,10 @@ const originalAssemblyAITranscriptionModel = process.env.AFTERTASTE_ASSEMBLYAI_T
 const originalGeminiApiKey = process.env.AFTERTASTE_GEMINI_API_KEY;
 const originalGeminiModel = process.env.AFTERTASTE_GEMINI_MODEL;
 const originalGeminiBaseUrl = process.env.AFTERTASTE_GEMINI_BASE_URL;
+const originalCobaltApiUrl = process.env.AFTERTASTE_COBALT_API_URL;
+const originalCobaltApiKey = process.env.AFTERTASTE_COBALT_API_KEY;
+const originalCobaltBearerToken = process.env.AFTERTASTE_COBALT_BEARER_TOKEN;
+const originalCobaltTimeoutMs = process.env.AFTERTASTE_COBALT_TIMEOUT_MS;
 const tempRoots: string[] = [];
 
 afterEach(() => {
@@ -55,6 +63,10 @@ afterEach(() => {
   restoreEnv("AFTERTASTE_GEMINI_API_KEY", originalGeminiApiKey);
   restoreEnv("AFTERTASTE_GEMINI_MODEL", originalGeminiModel);
   restoreEnv("AFTERTASTE_GEMINI_BASE_URL", originalGeminiBaseUrl);
+  restoreEnv("AFTERTASTE_COBALT_API_URL", originalCobaltApiUrl);
+  restoreEnv("AFTERTASTE_COBALT_API_KEY", originalCobaltApiKey);
+  restoreEnv("AFTERTASTE_COBALT_BEARER_TOKEN", originalCobaltBearerToken);
+  restoreEnv("AFTERTASTE_COBALT_TIMEOUT_MS", originalCobaltTimeoutMs);
   while (tempRoots.length > 0) {
     const root = tempRoots.pop();
     if (root) fs.rmSync(root, { recursive: true, force: true });
@@ -133,6 +145,105 @@ test("link-only capture survives metadata fetch failure and compiles the vault",
   const log = fs.readFileSync(path.join(root, "log", `${compactDate}.md`), "utf-8");
   assert.match(log, /capture \|/);
   assert.match(log, /compile \|/);
+});
+
+test("instagram metadata titles are decoded and condensed into clean capture titles", async () => {
+  const root = makeTempRoot();
+  globalThis.fetch = async () => new Response(
+    `<html><head>
+      <meta property="og:title" content="Jason Murray on Instagram: &#x201c;How do you become visually fluent? In Episode 3 of my series &#x201c;The Theory of Taste&#x201d; we are beginning to turn your taste into an actual skill. Taste will never be the moat if you can&#x2019;t speak the language.&#x201d;">
+      <meta property="og:description" content="A reel about visual literacy and turning taste into skill.">
+      <title>Jason Murray on Instagram: &#x201c;How do you become visually fluent?&#x201d;</title>
+    </head></html>`,
+    { status: 200, headers: { "content-type": "text/html" } },
+  );
+
+  const detail = await createCapture(root, {
+    sourceUrl: "https://www.instagram.com/reel/clean-title-test/",
+  });
+
+  assert.equal(detail.capture.metadata.title, "How do you become visually fluent?");
+  assert.equal(detail.reference?.title, "How do you become visually fluent?");
+  assert.doesNotMatch(detail.capture.metadata.title ?? "", /&#x201c;|&#x2019;|on Instagram:/i);
+});
+
+test("discovery sessions persist curated references and reaction updates", async () => {
+  const root = makeTempRoot();
+  globalThis.fetch = async () =>
+    htmlResponse("Launch film", "A cinematic close-up launch film about discipline and tenderness.");
+
+  const detail = await createCapture(root, {
+    sourceUrl: "https://example.com/launch-film",
+    note: "client liked the close-up launch texture",
+  });
+
+  const session = createDiscoverySession(root, {
+    title: "Startup launch alignment",
+    clientName: "Northstar",
+    campaignGoal: "Clarify what the founder wants the launch trailer to feel like.",
+    prompt: "Is this close to what you want from the agency?",
+    durationTargetMinutes: 18,
+    items: [
+      { referenceId: detail.capture.id },
+      { sourceUrl: "https://example.com/manual-reference", title: "Manual reference", tags: ["fast pacing"] },
+    ],
+  });
+
+  assert.equal(session.status, "active");
+  assert.equal(session.items.length, 2);
+  assert.equal(session.items[0]?.referenceId, detail.capture.id);
+  assert.equal(session.items[0]?.title, detail.reference?.title);
+  assert.ok(fs.existsSync(path.join(root, "outputs", "discovery", `${session.id}.json`)));
+
+  const reacted = recordDiscoveryReaction(root, session.id, {
+    itemId: session.items[0]!.id,
+    vote: "save",
+    intensity: 5,
+    note: "This feels closest to the founder story.",
+  });
+
+  assert.equal(reacted.reactions.length, 1);
+  assert.equal(reacted.reactions[0]?.vote, "save");
+  assert.equal(reacted.reactions[0]?.intensity, 5);
+  assert.equal(getDiscoverySession(root, session.id).session.reactions[0]?.note, "This feels closest to the founder story.");
+});
+
+test("discovery report fallback summarizes liked and rejected patterns", async () => {
+  const root = makeTempRoot();
+  delete process.env.AFTERTASTE_OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  globalThis.fetch = async () =>
+    htmlResponse("Founder trailer", "A reflective founder trailer with close-up details, patient pacing, and warm voiceover.");
+
+  const liked = await createCapture(root, {
+    sourceUrl: "https://example.com/founder-trailer",
+    note: "love the patient close-up voiceover",
+  });
+  const rejected = await createCapture(root, {
+    sourceUrl: "https://example.com/overcut-ad",
+    note: "too fast and over-explained",
+  });
+  const session = createDiscoverySession(root, {
+    title: "Pre-call taste check",
+    campaignGoal: "Find a useful shape for the launch video.",
+    items: [
+      { referenceId: liked.capture.id },
+      { referenceId: rejected.capture.id },
+    ],
+  });
+  recordDiscoveryReaction(root, session.id, { itemId: session.items[0]!.id, vote: "like", intensity: 4 });
+  recordDiscoveryReaction(root, session.id, { itemId: session.items[1]!.id, vote: "not-this", intensity: 3 });
+
+  const response = await generateDiscoveryReport(root, session.id);
+
+  assert.equal(response.session.status, "reported");
+  assert.ok(response.report);
+  assert.match(response.report.summary, /could point toward/i);
+  assert.ok(response.report.likedPatterns.length > 0);
+  assert.ok(response.report.rejectedPatterns.length > 0);
+  assert.ok(response.report.openQuestions.length > 0);
+  assert.deepEqual(response.report.citedItemIds.includes(session.items[0]!.id), true);
+  assert.ok(fs.existsSync(path.join(root, "outputs", "discovery", `${session.id}-report.json`)));
 });
 
 test("instagram reel uploads promote acquisition provenance into transcript and media artifacts", async () => {
@@ -217,6 +328,131 @@ test("instagram reel uploads promote acquisition provenance into transcript and 
   assert.ok(
     fs.existsSync(path.join(root, "raw", "media", detail.capture.id, "history", "media-analysis", `${mediaArtifact.generation?.id}.json`)),
   );
+});
+
+test("cobalt-backed capture downloads source media bytes and transcribes local video for analysis", async () => {
+  const root = makeTempRoot();
+  process.env.AFTERTASTE_COBALT_API_URL = "https://cobalt.local";
+  process.env.AFTERTASTE_COBALT_API_KEY = "cobalt-key";
+  process.env.AFTERTASTE_OPENAI_API_KEY = "openai-test-key";
+  process.env.AFTERTASTE_OPENAI_TRANSCRIPTION_MODEL = "whisper-1";
+  process.env.AFTERTASTE_OPENAI_BASE_URL = "https://mocked.openai.local/v1";
+
+  let cobaltRequested = false;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : String(input);
+    if (url === "https://cobalt.local") {
+      cobaltRequested = true;
+      assert.equal(init?.method, "POST");
+      assert.equal((init?.headers as Record<string, string> | undefined)?.Authorization, "Api-Key cobalt-key");
+      return new Response(
+        JSON.stringify({
+          status: "tunnel",
+          url: "https://cobalt.local/tunnel/video-asset",
+          filename: "source-clip.mp4",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (url === "https://cobalt.local/tunnel/video-asset") {
+      return new Response(new Uint8Array([0, 1, 2, 3]), {
+        status: 200,
+        headers: {
+          "content-type": "video/mp4",
+          "content-disposition": 'attachment; filename="source-clip.mp4"',
+        },
+      });
+    }
+    if (url === "https://mocked.openai.local/v1/audio/transcriptions") {
+      return new Response(
+        JSON.stringify({
+          text: "this downloaded video finally has words we can analyze",
+          language: "en",
+          segments: [
+            {
+              start: 0,
+              end: 2.4,
+              text: "this downloaded video finally has words we can analyze",
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    return htmlResponse("TikTok capture", "A quiet short-form clip.");
+  };
+
+  const detail = await createCapture(root, {
+    sourceUrl: "https://www.tiktok.com/@maker/video/1234567890",
+    note: "want the spoken line and pacing",
+  });
+
+  assert.equal(cobaltRequested, true);
+  assert.equal(detail.capture.ingestionMode, "link-note");
+  assert.equal(detail.capture.acquisition?.mode, "best-effort-extractor");
+  assert.equal(detail.capture.acquisition?.provider, "cobalt");
+  assert.equal(detail.capture.acquisitionCoverage, "byte-backed");
+  assert.equal(detail.capture.assets.length, 1);
+  assert.equal(detail.capture.assets[0]?.origin, "source-download");
+  assert.equal(detail.analysis?.transcriptProvenance.source, "audio-upload");
+  assert.match(detail.analysis?.transcript ?? "", /downloaded video finally has words/i);
+  assert.equal(
+    detail.capture.acquisitionAttempts?.some(
+      (attempt) => attempt.target === "transcript-text" && attempt.mode === "best-effort-extractor" && attempt.provider === "cobalt" && attempt.status === "ok",
+    ),
+    true,
+  );
+  assert.ok(fs.existsSync(path.join(root, detail.capture.assets[0]!.path)));
+});
+
+test("re-running analysis can backfill source media bytes through cobalt for older captures", async () => {
+  const root = makeTempRoot();
+  globalThis.fetch = async () => htmlResponse("Vimeo clip", "Metadata only on first pass.");
+
+  const detail = await createCapture(root, {
+    sourceUrl: "https://vimeo.com/123456789",
+    note: "backfill cobalt later",
+  });
+
+  assert.equal(detail.capture.assets.length, 0);
+  assert.notEqual(detail.capture.acquisition?.provider, "cobalt");
+
+  process.env.AFTERTASTE_COBALT_API_URL = "https://cobalt.local";
+  process.env.AFTERTASTE_COBALT_BEARER_TOKEN = "cobalt-bearer";
+
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : String(input);
+    if (url === "https://cobalt.local") {
+      assert.equal((init?.headers as Record<string, string> | undefined)?.Authorization, "Bearer cobalt-bearer");
+      return new Response(
+        JSON.stringify({
+          status: "tunnel",
+          url: "https://cobalt.local/tunnel/backfill-video",
+          filename: "backfill.mp4",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (url === "https://cobalt.local/tunnel/backfill-video") {
+      return new Response(new Uint8Array([9, 8, 7, 6]), {
+        status: 200,
+        headers: {
+          "content-type": "video/mp4",
+          "content-disposition": 'attachment; filename="backfill.mp4"',
+        },
+      });
+    }
+    return htmlResponse("Vimeo clip", "Metadata only on first pass.");
+  };
+
+  await runAnalysis(root, detail.capture.id);
+
+  const refreshed = JSON.parse(fs.readFileSync(path.join(root, detail.capture.rawPaths.capture), "utf-8")) as typeof detail.capture;
+  assert.equal(refreshed.assets.length, 1);
+  assert.equal(refreshed.assets[0]?.origin, "source-download");
+  assert.equal(refreshed.acquisition?.provider, "cobalt");
+  assert.equal(refreshed.acquisition?.mode, "best-effort-extractor");
+  assert.equal(refreshed.acquisitionCoverage, "byte-backed");
 });
 
 test("capture with note and upload becomes hybrid analysis and writes relative asset paths", async () => {
@@ -944,6 +1180,8 @@ test("llm-backed capture analysis can replace template summaries with grounded w
   });
 
   assert.match(detail.analysis?.summary ?? "", /written reflection on retention/i);
+  assert.match(detail.reference?.summary ?? "", /The personal reason for saving it is right on the page/i);
+  assert.match(detail.reference?.summary ?? "", /the good shit sticks/i);
   assert.equal(detail.analysis?.openQuestions.includes("Which line here feels worth turning into a creator-facing premise later?"), true);
 });
 
@@ -1022,6 +1260,8 @@ test("text-led references do not surface generic prose words as visual or pacing
   assert.deepEqual(detail.reference?.visualSignals, []);
   assert.deepEqual(detail.reference?.audioSignals, []);
   assert.deepEqual(detail.reference?.pacingSignals, []);
+  assert.match(detail.reference?.summary ?? "", /The personal reason for saving it is right on the page/i);
+  assert.match(detail.reference?.summary ?? "", /In the archive/i);
   assert.doesNotMatch(detail.reference?.summary ?? "", /visually|audio-wise|movement trace|lingering|steady build/i);
 });
 
@@ -1300,6 +1540,7 @@ test("compile writes a first-class taste graph with weighted evidence-backed edg
   const referenceEdge = graph.edges.find((edge) => edge.kind === "related_reference");
   assert.ok(referenceEdge);
   assert.ok((referenceEdge?.evidence.referenceIds.length ?? 0) >= 2);
+  assert.ok((referenceEdge?.evidence.relationKinds?.length ?? 0) > 0);
   assert.ok((referenceEdge?.weight ?? 0) > 0);
   assert.equal(persisted.nodes.length, graph.nodes.length);
   assert.ok(persisted.edges.some((edge) => edge.sourceId === ideas.session.id || edge.targetId === ideas.session.id));
@@ -1336,6 +1577,8 @@ test("related references rank closer matches above unrelated ones", async () => 
   assert.equal(related.referenceId, first.capture.id);
   assert.ok(related.catalysts.length > 0);
   assert.equal(related.related[0]?.id, second.capture.id);
+  assert.ok((related.relationDetails?.[0]?.reason.length ?? 0) > 0);
+  assert.ok((related.relationDetails?.[0]?.relationKinds.length ?? 0) > 0);
   assert.ok(
     related.related.findIndex((reference) => reference.id === second.capture.id) <
       related.related.findIndex((reference) => reference.id === third.capture.id),
@@ -1343,6 +1586,38 @@ test("related references rank closer matches above unrelated ones", async () => 
 
   const refreshed = listReferences(root).references.find((reference) => reference.id === first.capture.id);
   assert.equal(refreshed?.relatedReferenceIds[0], second.capture.id);
+});
+
+test("reference connections explain worldview-to-expression relationships", async () => {
+  const root = makeTempRoot();
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("worldview")) {
+      return htmlResponse("Worldview essay", "A written essay about authorship, identity, and how creative tools change what making means.");
+    }
+    if (url.includes("expression")) {
+      return htmlResponse("Expression reel", "A close-up montage about authorship, identity, and visual language in practice.");
+    }
+    return htmlResponse("Other post", "A reflective note about tenderness and friendship.");
+  };
+
+  const worldview = await createCapture(root, {
+    sourceUrl: "https://example.com/worldview",
+    note: "this feels like a worldview for aftertaste and how i think about authorship",
+  });
+  await createCapture(root, {
+    sourceUrl: "https://example.com/expression",
+    note: "this feels like the visual expression of the same authorship question",
+  });
+  await createCapture(root, {
+    sourceUrl: "https://example.com/other",
+    note: "soft friendship note",
+  });
+
+  compileAftertaste(root);
+
+  const page = fs.readFileSync(path.join(root, "wiki", "references", `${worldview.capture.id}.md`), "utf-8");
+  assert.match(page, /worldview and the other more like the practical expression of it/i);
 });
 
 test("query index supports filtered archive search without scanning markdown", async () => {
@@ -1867,6 +2142,49 @@ test("wiki article detail exposes structured encyclopedia context and lint finds
     lint.issues.length > 0
       || fs.readdirSync(path.join(root, "wiki", "concepts")).some((file) => file.endsWith(".md")),
   );
+});
+
+test("compiled wiki pages read like narrative archive entries instead of signal dumps", async () => {
+  const root = makeTempRoot();
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("a")) {
+      return htmlResponse("AI-native worldbuilding", "An essay about AI-native filmmaking, identity, and authorship.");
+    }
+    if (url.includes("b")) {
+      return htmlResponse("Visual fluency", "A reflective post about taste, authorship, and visual literacy.");
+    }
+    return htmlResponse("Archive note", "A short reflection about ambition and creative identity.");
+  };
+
+  const first = await createCapture(root, {
+    sourceUrl: "https://example.com/a",
+    note: "this feels like a worldview for aftertaste, not just an article about ai",
+  });
+  await createCapture(root, {
+    sourceUrl: "https://example.com/b",
+    note: "this connects to the same identity question but from a visual language angle",
+  });
+  await createCapture(root, {
+    sourceUrl: "https://example.com/c",
+    note: "this is another piece of the same authorship thread",
+  });
+
+  compileAftertaste(root);
+
+  const referencePage = fs.readFileSync(path.join(root, "wiki", "references", `${first.capture.id}.md`), "utf-8");
+  const indexPage = fs.readFileSync(path.join(root, "wiki", "index.md"), "utf-8");
+  const snapshotPage = fs.readFileSync(path.join(root, "wiki", "snapshots", "current.md"), "utf-8");
+
+  assert.match(referencePage, /## Why It Lives In The Archive/);
+  assert.match(referencePage, /## Connections In This Archive/);
+  assert.match(referencePage, /## Archive Coordinates/);
+  assert.doesNotMatch(referencePage, /## Taste Signals/);
+  assert.match(indexPage, /# Aftertaste Main Page/);
+  assert.match(indexPage, /## Browse The Canon/);
+  assert.match(snapshotPage, /## Current Arc/);
+  assert.match(snapshotPage, /## Relationship Web/);
+  assert.doesNotMatch(snapshotPage, /## Themes/);
 });
 
 test("folder-split concept pages resolve through their index file", () => {

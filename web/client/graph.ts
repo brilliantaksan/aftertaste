@@ -259,23 +259,38 @@ export function renderGraph(
     wrap.appendChild(tooltip);
   }
 
+  function formatRelationLabel(value: string): string {
+    return value.replace(/[_-]/g, " ");
+  }
+
   function showTooltip(event: MouseEvent, d: GraphNode): void {
     const wrapRect = wrap.getBoundingClientRect();
     // Sorted neighbours: strongest edge weight first, cap at 7
-    const neighbourNodes = data.edges
+    const neighbourEdges = data.edges
       .filter((e) => e.sourceId === d.id || e.targetId === d.id)
       .sort((a, b) => b.weight - a.weight)
-      .slice(0, 7)
+      .slice(0, 5);
+
+    const neighbourNodes = neighbourEdges
       .map((e) => {
         const otherId = e.sourceId === d.id ? e.targetId : e.sourceId;
-        return nodes.find((n) => n.id === otherId);
+        const other = nodes.find((n) => n.id === otherId);
+        return other ? { node: other, edge: e } : null;
       })
-      .filter((n): n is GraphNode => n !== undefined);
+      .filter((n): n is { node: GraphNode; edge: TasteGraph["edges"][number] } => n !== null);
 
-    const connRows = neighbourNodes.map((n) => `
+    const connRows = neighbourNodes.map(({ node, edge }) => `
       <div class="gt-conn-row">
-        <span class="gt-dot" style="background:${groupColor(n.group)}"></span>
-        <span class="gt-conn-name">${n.title || n.label}</span>
+        <div class="gt-conn-row-top">
+          <span class="gt-dot" style="background:${groupColor(node.group)}"></span>
+          <span class="gt-conn-name">${node.title || node.label}</span>
+        </div>
+        ${
+          edge.evidence.relationKinds && edge.evidence.relationKinds.length > 0
+            ? `<div class="gt-pill-row">${edge.evidence.relationKinds.slice(0, 3).map((kind) => `<span class="gt-pill">${formatRelationLabel(kind)}</span>`).join("")}</div>`
+            : ""
+        }
+        ${edge.evidence.explanation ? `<div class="gt-conn-expl">${edge.evidence.explanation}</div>` : ""}
       </div>`).join("");
 
     tooltip.innerHTML = `

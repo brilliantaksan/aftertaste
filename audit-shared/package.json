@@ -2,6 +2,7 @@
   "name": "audit-shared",
   "version": "0.1.0",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
   "description": "Shared audit schema, anchor algorithm, id generator, and YAML serializer for the LLM Wiki Obsidian plugin and web viewer.",
   "type": "module",
   "main": "dist/index.js",

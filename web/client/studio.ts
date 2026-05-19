@@ -3,6 +3,7 @@ import type { AuditEntry } from "audit-shared";
 import { installFeedbackUI } from "./feedback.js";
 import type { TasteGraph, WikiArticleDetail, WikiCleanupPreview, WikiLintReport } from "../shared/contracts.js";
 import { renderGraph, type GraphHandle, type GraphNode } from "./graph.js";
+import { applyReveal } from "./lib/reveal.js";
 import { ParticleField } from "./particles.js";
 import { renderTree, type TreeNode } from "./tree.js";
 
@@ -181,6 +182,7 @@ export class StudioController {
       history.pushState({ view: "studio", page }, "", buildStudioUrl(page));
       void this.loadPage(page);
     }, this.state.currentPath);
+    applyReveal(container);
   }
 
   private async loadPage(pathArg: string): Promise<void> {
@@ -198,6 +200,7 @@ export class StudioController {
       this.state.rawMarkdown = data.raw ?? "";
       pageEl.innerHTML = data.html ?? '<p class="loading">Article render unavailable.</p>';
       await this.renderMermaidBlocks(pageEl);
+      applyReveal(pageEl);
       this.highlightTreeSelection(data.path);
       const titleEl = document.getElementById("wiki-title");
       if (titleEl) titleEl.textContent = data.title ?? data.path;
@@ -254,6 +257,13 @@ export class StudioController {
   private renderArticleContext(article: WikiArticleDetail): void {
     const container = document.getElementById("article-context");
     if (!container) return;
+    const supportingReferences = Array.isArray((article as WikiArticleDetail & { supportingReferences?: WikiArticleDetail["supportingReferences"] }).supportingReferences)
+      ? (article as WikiArticleDetail & { supportingReferences?: WikiArticleDetail["supportingReferences"] }).supportingReferences ?? []
+      : article.supportingReferenceIds.map((referenceId) => ({
+        id: referenceId,
+        title: referenceId,
+        path: `wiki/references/${referenceId}.md`,
+      }));
     container.innerHTML = `
       <div class="article-context">
         <article class="article-context-card">
@@ -264,9 +274,9 @@ export class StudioController {
         <article class="article-context-card">
           <span class="detail-label">Supporting references</span>
           <div class="article-context-list">
-            ${article.supportingReferenceIds.length > 0
-              ? article.supportingReferenceIds
-                  .map((referenceId) => `<button class="reference-inline-pill" type="button" data-open-page="wiki/references/${escapeAttribute(referenceId)}.md">${escapeHtml(referenceId)}</button>`)
+            ${supportingReferences.length > 0
+              ? supportingReferences
+                  .map((reference) => `<button class="reference-inline-pill" type="button" data-open-page="${escapeAttribute(reference.path)}">${escapeHtml(reference.title)}</button>`)
                   .join("")
               : `<span class="empty-copy">No supporting references listed yet.</span>`}
           </div>
@@ -299,6 +309,7 @@ export class StudioController {
         </article>
       </div>
     `;
+    applyReveal(container);
     container.querySelectorAll<HTMLElement>("[data-open-page]").forEach((button) => {
       button.addEventListener("click", () => {
         const nextPath = button.getAttribute("data-open-page");
@@ -315,6 +326,7 @@ export class StudioController {
     const issues = this.state.lint?.issues.filter((issue) => issue.path === this.state.currentPath || issue.relatedPaths.includes(this.state.currentPath)) ?? [];
     if (issues.length === 0) {
       container.innerHTML = `<div class="empty-state"><span class="empty-state-icon">✦</span><span>No lint issues on this page</span></div>`;
+      applyReveal(container);
       return;
     }
     container.innerHTML = issues
@@ -326,6 +338,7 @@ export class StudioController {
         </article>
       `)
       .join("");
+    applyReveal(container);
   }
 
   private async loadAudits(targetPath: string): Promise<void> {
@@ -337,9 +350,11 @@ export class StudioController {
       const data = (await response.json()) as { entries: AuditEntry[] };
       if (data.entries.length === 0) {
         container.innerHTML = `<div class="empty-state"><span class="empty-state-icon">◎</span><span>No open feedback here</span></div>`;
+        applyReveal(container);
         return;
       }
       container.innerHTML = data.entries.map((entry) => renderAudit(entry)).join("");
+      applyReveal(container);
       container.querySelectorAll("button[data-resolve]").forEach((button) => {
         button.addEventListener("click", async () => {
           const id = button.getAttribute("data-resolve");

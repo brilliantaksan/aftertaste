@@ -2,6 +2,7 @@
   "name": "obsidian-audit",
   "version": "0.1.0",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
   "description": "Obsidian plugin for the llm-wiki skill — select text → file an anchored audit comment.",
   "scripts": {
     "build": "node esbuild.config.mjs production",

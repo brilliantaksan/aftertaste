@@ -9,6 +9,10 @@ import {
   handleBriefDetail,
   handleCaptureAnalyze,
   handleCaptureCreate,
+  handleDiscoveryReactionCreate,
+  handleDiscoveryReportCreate,
+  handleDiscoverySessionCreate,
+  handleDiscoverySessionDetail,
   handleQueryIndex,
   handleRelatedReferences,
   handleSnapshotCurrent,
@@ -75,6 +79,79 @@ test("brief detail route returns 404 for a missing brief id", () => {
 
   assert.equal(state.statusCode, 404);
   assert.match(String((state.body as { error?: string } | null)?.error ?? ""), /brief not found/);
+});
+
+test("discovery session detail route returns 404 for a missing session id", () => {
+  const root = makeTempRoot();
+  const cfg: ServerConfig = {
+    wikiRoot: root,
+    port: 4175,
+    host: "127.0.0.1",
+    author: "test",
+  };
+  const state = makeJsonResponseRecorder();
+
+  handleDiscoverySessionDetail(cfg)({
+    params: { id: "missing-discovery" },
+  } as unknown as Request, state.res as Response);
+
+  assert.equal(state.statusCode, 404);
+  assert.match(String((state.body as { error?: string } | null)?.error ?? ""), /discovery session not found/);
+});
+
+test("discovery routes create sessions, record reactions, and generate reports", async () => {
+  const root = makeTempRoot();
+  const cfg: ServerConfig = {
+    wikiRoot: root,
+    port: 4175,
+    host: "127.0.0.1",
+    author: "test",
+  };
+
+  const createState = makeJsonResponseRecorder();
+  handleDiscoverySessionCreate(cfg)({
+    body: {
+      title: "Client taste pass",
+      clientName: "Acme",
+      campaignGoal: "Clarify the launch video mood before the pitch.",
+      items: [
+        {
+          sourceUrl: "https://example.com/trailer",
+          title: "Reference trailer",
+          tags: ["patient pacing", "founder story"],
+        },
+      ],
+    },
+  } as unknown as Request, createState.res as Response);
+
+  assert.equal(createState.statusCode, 201);
+  const session = (createState.body as { session?: { id?: string; items?: Array<{ id: string }> } }).session;
+  assert.ok(session?.id);
+  assert.equal(session.items?.length, 1);
+
+  const reactionState = makeJsonResponseRecorder();
+  handleDiscoveryReactionCreate(cfg)({
+    params: { id: session.id },
+    body: {
+      itemId: session.items![0]!.id,
+      vote: "like",
+      intensity: 4,
+      note: "This is close.",
+    },
+  } as unknown as Request, reactionState.res as Response);
+
+  assert.equal(reactionState.statusCode, 200);
+  assert.equal((reactionState.body as { session?: { reactions?: Array<{ vote?: string }> } }).session?.reactions?.[0]?.vote, "like");
+
+  const reportState = makeJsonResponseRecorder();
+  await handleDiscoveryReportCreate(cfg)({
+    params: { id: session.id },
+  } as unknown as Request, reportState.res as Response);
+
+  assert.equal(reportState.statusCode, 200);
+  const report = (reportState.body as { report?: { summary?: string; citedItemIds?: string[] } }).report;
+  assert.match(report?.summary ?? "", /could point toward/i);
+  assert.deepEqual(report?.citedItemIds, [session.items![0]!.id]);
 });
 
 test("capture create route rejects an invalid source kind", async () => {
